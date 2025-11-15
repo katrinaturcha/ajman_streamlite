@@ -35,8 +35,6 @@ st.title("📊 Сопоставление столбцов старой и но�
 # STEP 1 — FILE UPLOAD
 # =========================
 
-st.title("📊 Сопоставление столбцов старой и новой таблиц")
-
 col1, col2 = st.columns(2)
 
 with col1:
@@ -53,21 +51,44 @@ if not old_file or not new_file:
 # =========================
 
 def clean_excel_table(uploaded_file):
-    """Читает Excel-файл, находит строку с заголовками и возвращает очищенный DataFrame."""
-    df_all = pd.read_excel(uploaded_file, header=None)
+    """
+    Читает Excel-файл, ищет строку с 'Activity Master Number' и
+    возвращает очищенный DataFrame.
+    Работает корректно для файлов с мусорными строками сверху
+    и для стандартных файлов, где заголовок на первой строке.
+    Удаляет полностью пустые строки и столбцы.
+    """
+    # Читаем без заголовков целиком
+    df_all = pd.read_excel(uploaded_file, header=None, dtype=object)
 
+    # === 1. Поиск строки заголовков ===
     header_row_idx = None
     for i, row in df_all.iterrows():
         if row.astype(str).str.contains("Activity Master Number", case=False, na=False).any():
             header_row_idx = i
             break
 
+    # === 2. Если заголовок не найден, останавливаем работу ===
     if header_row_idx is None:
         st.error("❌ Не найдена строка с заголовком 'Activity Master Number'")
         st.stop()
 
-    df = pd.read_excel(uploaded_file, header=header_row_idx)
-    df = df.dropna(how="all").reset_index(drop=True)
+    # === 3. Если заголовок на первой строке — читаем стандартно ===
+    if header_row_idx == 0:
+        df = pd.read_excel(uploaded_file, dtype=object)
+    else:
+        # Иначе читаем с найденной строки
+        df = pd.read_excel(uploaded_file, header=header_row_idx, dtype=object)
+
+    # === 4. Удаляем полностью пустые строки ===
+    df = df.dropna(how="all")
+
+    # === 5. Удаляем полностью пустые столбцы ===
+    df = df.dropna(axis=1, how="all")
+
+    # === 6. Сброс индекса ===
+    df = df.reset_index(drop=True)
+
     return df
 
 # Применяем очистку

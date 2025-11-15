@@ -1,144 +1,110 @@
 import streamlit as st
 import pandas as pd
 import datetime
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 
-st.set_page_config(layout="wide", page_title="AJMAN Workflow")
-
-# ===============================
-# Вспомогательные функции
-# ===============================
-
-def editable_table(df):
-    """Отображает df в интерактивном AGGrid и возвращает изменённый df."""
-    gb = GridOptionsBuilder.from_dataframe(df)
-    gb.configure_default_column(editable=True, wrapText=True, autoHeight=True)
-    gb.configure_side_bar()
-    gb.configure_grid_options(enableRangeSelection=True)
-    gb.configure_selection("multiple")
-    grid_options = gb.build()
-
-    grid_response = AgGrid(
-        df,
-        gridOptions=grid_options,
-        update_mode=GridUpdateMode.VALUE_CHANGED,
-        fit_columns_on_grid_load=True,
-        enable_enterprise_modules=True
-    )
-
-    return pd.DataFrame(grid_response["data"])
-
-
-def log_change(log_df, description):
-    log_df.loc[len(log_df)] = {
-        "timestamp": datetime.datetime.now(),
-        "change": description
-    }
-
-
-# ===============================
-# Загрузка файла
-# ===============================
+st.set_page_config(page_title="AJMAN Comparator", layout="wide")
 
 uploaded = st.file_uploader("Загрузите AJM.xlsx", type=["xlsx"])
+
 if not uploaded:
     st.stop()
 
 xls = pd.ExcelFile(uploaded)
 
-# Главные таблицы
-df_compare_nosymb = pd.read_excel(xls, "df_compare_nosymb")
+# === ТАБЛИЦЫ ===
+df_raw_v1 = pd.read_excel(xls, "df_raw_v1")
+df_raw_v2 = pd.read_excel(xls, "df_raw_v2")
+
+# Главная таблица сравнений
+df_compare = pd.read_excel(xls, "df_compare_nosymb")
+
+# Таблица, куда менеджер пишет решения
 df_edit_before_db = pd.read_excel(xls, "df_edit_before_db")
 
 # Логи
 log_schema = pd.read_excel(xls, "log_schema")
 log_edit = pd.read_excel(xls, "log_edit")
 
-# ============================================
-# ЭТАП 1 — Проверка различий df_compare_nosymb
-# ============================================
 
-st.header("ЭТАП 1 — Проверка различий (df_compare_nosymb)")
+STATUS_LIST = ["Было", "Новое", "Удалить", "Изменено", "Проверить вручную"]
 
-# Фильтр по статусу
-status_filter = st.multiselect(
-    "Фильтр по статусу",
-    df_compare_nosymb["Статус"].dropna().unique(),
+
+# ======================================================
+# ИНТЕРАКТИВНАЯ ОБРАБОТКА СТРОК
+# ======================================================
+
+st.header("🔍 Проверка изменений")
+
+row_id = st.number_input(
+    "Строка в таблице сравнения",
+    min_value=0,
+    max_value=len(df_compare) - 1,
+    step=1
 )
 
-if status_filter:
-    df_filtered = df_compare_nosymb[df_compare_nosymb["Статус"].isin(status_filter)]
-else:
-    df_filtered = df_compare_nosymb
+row = df_compare.loc[row_id]
+st.subheader("Данные строки")
+st.dataframe(row.to_frame(), use_container_width=True)
 
-st.subheader("Редактируемая таблица")
-df_stage1 = editable_table(df_filtered)
+# Текущие значения
+current_status = df_edit_before_db.loc[row_id, "Статус"] if "Статус" in df_edit_before_db.columns else "Проверить вручную"
+current_comment = df_edit_before_db.loc[row_id, "Комментарий"] if "Комментарий" in df_edit_before_db.columns else ""
 
-if st.button("💾 Сохранить изменения (Этап 1)"):
-    df_compare_nosymb.update(df_stage1)
-    log_change(log_schema, "Изменения сохранены в df_compare_nosymb")
-    st.success("Изменения сохранены!")
+status = st.selectbox("Статус", STATUS_LIST, index=STATUS_LIST.index(current_status))
+comment = st.text_area("Комментарий", value=current_comment, height=100)
 
-if st.button("⬇ Скачать Excel для переводчика"):
-    out = pd.ExcelWriter("AJM_for_translator.xlsx", engine="openpyxl")
-    df_compare_nosymb.to_excel(out, "df_compare_nosymb", index=False)
-    log_schema.to_excel(out, "log_schema", index=False)
-    out.close()
-    st.download_button("Скачать файл", open("AJM_for_translator.xlsx", "rb"), "AJM_for_translator.xlsx")
+if st.button("💾 Сохранить решение"):
+    df_edit_before_db.loc[row_id, "Статус"] = status
+    df_edit_before_db.loc[row_id, "Комментарий"] = comment
 
+    log_edit.loc[len(log_edit)] = {
+        "timestamp": datetime.datetime.now(),
+        "row_id": row_id,
+        "new_status": status,
+        "new_comment": comment
+    }
 
-# ============================================
-# ЭТАП 2 — Работа с переводами
-# ============================================
-
-st.header("ЭТАП 2 — Проверка переводов")
-
-st.write("Пока используем df_trans_v1, df_trans_v2 → df_compare_trans")
-
-df_trans_v1 = pd.read_excel(xls, "df_trans_v1")
-df_trans_v2 = pd.read_excel(xls, "df_trans_v2")
-df_compare_trans = pd.read_excel(xls, "df_compare_trans")
-
-status_filter2 = st.multiselect(
-    "Фильтр по статусу перевода",
-    df_compare_trans["Статус"].dropna().unique(),
-)
-
-if status_filter2:
-    df_trans_filtered = df_compare_trans[df_compare_trans["Статус"].isin(status_filter2)]
-else:
-    df_trans_filtered = df_compare_trans
-
-st.subheader("Редактируемая таблица переводов")
-df_stage2 = editable_table(df_trans_filtered)
-
-if st.button("💾 Сохранить изменения (Этап 2)"):
-    df_compare_trans.update(df_stage2)
-    log_change(log_edit, "Изменения переводов сохранены")
-    st.success("Изменения сохранены!")
+    st.success("Сохранено!")
 
 
-# ============================================
-# ЭТАП 3 — Итоговая таблица для загрузки в БД
-# ============================================
+# ======================================================
+# ПОКАЗ ЛЮБЫХ ТАБЛИЦ
+# ======================================================
 
-st.header("ЭТАП 3 — Итоговые данные для БД")
+st.header("📄 Просмотр таблиц")
 
-final_df = df_edit_before_db.copy()
+tables = {
+    "df_compare_nosymb": df_compare,
+    "df_edit_before_db": df_edit_before_db,
+    "log_edit": log_edit,
+    "log_schema": log_schema,
+    "df_raw_v1": df_raw_v1,
+    "df_raw_v2": df_raw_v2
+}
 
-st.subheader("Итоговая таблица")
-st.dataframe(final_df, use_container_width=True)
+selected = st.selectbox("Выберите таблицу", list(tables.keys()))
 
-st.subheader("📘 История изменений структуры (log_schema)")
-st.dataframe(log_schema, use_container_width=True)
+st.dataframe(tables[selected], use_container_width=True)
 
-st.subheader("📙 История правок менеджеров (log_edit)")
-st.dataframe(log_edit, use_container_width=True)
 
-if st.button("⬇ Скачать итоговый файл для БД"):
-    out = pd.ExcelWriter("AJM_final.xlsx", engine="openpyxl")
-    final_df.to_excel(out, "final_for_db", index=False)
-    log_schema.to_excel(out, "log_schema", index=False)
-    log_edit.to_excel(out, "log_edit", index=False)
-    out.close()
-    st.download_button("Скачать AJM_final.xlsx", open("AJM_final.xlsx", "rb"), "AJM_final.xlsx")
+# ======================================================
+# СКАЧИВАНИЕ ОБНОВЛЕННОГО ФАЙЛА
+# ======================================================
+
+st.header("⬇ Скачать обновлённый файл")
+
+if st.button("Собрать Excel"):
+    out_path = "AJM_updated.xlsx"
+    writer = pd.ExcelWriter(out_path, engine="openpyxl")
+
+    df_raw_v1.to_excel(writer, "df_raw_v1", index=False)
+    df_raw_v2.to_excel(writer, "df_raw_v2", index=False)
+    df_compare.to_excel(writer, "df_compare_nosymb", index=False)
+    df_edit_before_db.to_excel(writer, "df_edit_before_db", index=False)
+    log_edit.to_excel(writer, "log_edit", index=False)
+    log_schema.to_excel(writer, "log_schema", index=False)
+
+    writer.close()
+
+    with open(out_path, "rb") as f:
+        st.download_button("⬇ Скачать AJM_updated.xlsx", f, file_name="AJM_updated.xlsx")

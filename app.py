@@ -1,13 +1,23 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import io
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 
+st.set_page_config(layout="wide", page_title="AJMAN – Compare & Merge")
+
+
+# ============================================================
+# ФУНКЦИЯ ОЧИСТКИ ФАЙЛА (оставляем строго твою логику)
+# ============================================================
 def clean_excel_table(uploaded_file):
-    """Читает Excel-файл, находит строку с заголовками и возвращает очищенный DataFrame."""
-    # Читаем полностью без заголовков
-    df_all = pd.read_excel(uploaded_file, header=None)
+    """
+    Читает Excel-файл, ищет строку с 'Activity Master Number' и
+    возвращает очищенный DataFrame.
+    Работает и для грязных файлов, и для стандартных.
+    """
+    df_all = pd.read_excel(uploaded_file, header=None, dtype=object)
 
-    # Ищем строку, где встречается "Activity Master Number"
     header_row_idx = None
     for i, row in df_all.iterrows():
         if row.astype(str).str.contains("Activity Master Number", case=False, na=False).any():
@@ -18,22 +28,23 @@ def clean_excel_table(uploaded_file):
         st.error("❌ Не найдена строка с заголовком 'Activity Master Number'")
         st.stop()
 
-    # Загружаем таблицу с правильного заголовка
-    df = pd.read_excel(uploaded_file, header=header_row_idx)
+    if header_row_idx == 0:
+        df = pd.read_excel(uploaded_file, dtype=object)
+    else:
+        df = pd.read_excel(uploaded_file, header=header_row_idx, dtype=object)
 
-    # Удаляем полностью пустые строки
-    df = df.dropna(how="all").reset_index(drop=True)
+    df = df.dropna(how="all")            # удалить пустые строки
+    df = df.dropna(axis=1, how="all")    # удалить пустые столбцы
+    df = df.reset_index(drop=True)
 
     return df
 
 
-st.set_page_config(layout="wide", page_title="Column Mapping Tool")
+# ============================================================
+# UI: ЗАГРУЗКА ФАЙЛОВ
+# ============================================================
 
-st.title("📊 Сопоставление столбцов старой и новой таблиц")
-
-# =========================
-# STEP 1 — FILE UPLOAD
-# =========================
+st.title("📊 AJMAN — Сравнение, сопоставление и объединение таблиц")
 
 col1, col2 = st.columns(2)
 
@@ -46,87 +57,31 @@ with col2:
 if not old_file or not new_file:
     st.stop()
 
-# =========================
-# CLEAN BOTH EXCEL FILES
-# =========================
+st.success("Файлы загружены! Идёт обработка...")
 
-def clean_excel_table(uploaded_file):
-    """
-    Читает Excel-файл, ищет строку с 'Activity Master Number' и
-    возвращает очищенный DataFrame.
-    Работает корректно для файлов с мусорными строками сверху
-    и для стандартных файлов, где заголовок на первой строке.
-    Удаляет полностью пустые строки и столбцы.
-    """
-    # Читаем без заголовков целиком
-    df_all = pd.read_excel(uploaded_file, header=None, dtype=object)
 
-    # === 1. Поиск строки заголовков ===
-    header_row_idx = None
-    for i, row in df_all.iterrows():
-        if row.astype(str).str.contains("Activity Master Number", case=False, na=False).any():
-            header_row_idx = i
-            break
+# ============================================================
+# ЧИСТИМ ОБА ФАЙЛА
+# ============================================================
 
-    # === 2. Если заголовок не найден, останавливаем работу ===
-    if header_row_idx is None:
-        st.error("❌ Не найдена строка с заголовком 'Activity Master Number'")
-        st.stop()
-
-    # === 3. Если заголовок на первой строке — читаем стандартно ===
-    if header_row_idx == 0:
-        df = pd.read_excel(uploaded_file, dtype=object)
-    else:
-        # Иначе читаем с найденной строки
-        df = pd.read_excel(uploaded_file, header=header_row_idx, dtype=object)
-
-    # === 4. Удаляем полностью пустые строки ===
-    df = df.dropna(how="all")
-
-    # === 5. Удаляем полностью пустые столбцы ===
-    df = df.dropna(axis=1, how="all")
-
-    # === 6. Сброс индекса ===
-    df = df.reset_index(drop=True)
-
-    return df
-
-# Применяем очистку
 df_old = clean_excel_table(old_file)
 df_new = clean_excel_table(new_file)
 
 old_cols = list(df_old.columns)
 new_cols = list(df_new.columns)
 
-st.success("Файлы успешно загружены и автоматически очищены.")
+st.write("### 🧼 Очищенные таблицы загружены:")
+st.write(f"Старая таблица: {df_old.shape[0]} строк, {df_old.shape[1]} колонок")
+st.write(f"Новая таблица: {df_new.shape[0]} строк, {df_new.shape[1]} колонок")
 
-# =====================================
-# STEP 2 — Объединённая таблица (чисто визуально)
-# =====================================
 
-st.header("🔎 Объединённая таблица по Activity Master Number")
-
-if "Activity Master Number" in df_old.columns and "Activity Master Number" in df_new.columns:
-    merged = df_old.merge(df_new, on="Activity Master Number", how="outer", suffixes=("_old", "_new"))
-    st.dataframe(merged, use_container_width=True)
-else:
-    st.error("Оба файла должны содержать столбец 'Activity Master Number'")
-    st.stop()
-
-# =====================================
-# STEP 3 — Форма сопоставления столбцов
-# =====================================
+# ============================================================
+# СОПОСТАВЛЕНИЕ КОЛОНОК
+# ============================================================
 
 st.header("🧩 Сопоставление столбцов")
 
-st.markdown("""
-Выберите, какой столбец из НОВОГО файла соответствует каждому столбцу из СТАРОГО файла.
-
-- Если не выбирать — столбец считается **удалённым**.
-- Если столбец из нового файла никто не выбрал — он считается **добавленным**.
-- Если выбрать столбец с таким же названием — **не изменён**.
-- Если выбрать другое название — **переименован**.
-""")
+st.markdown("Выберите, каким столбцам из НОВОГО файла соответствуют столбцы из СТАРОГО файла.")
 
 mapping = {}
 
@@ -138,52 +93,131 @@ for col in old_cols:
     )
     mapping[col] = choice if choice != "— Нет соответствия —" else None
 
-# =====================================
-# STEP 4 — Анализ изменений
-# =====================================
+st.success("Сопоставление колонок завершено!")
 
-st.header("📘 Результат сопоставления")
 
-used_new_cols = set([v for v in mapping.values() if v is not None])
+# ============================================================
+# ПРИМЕНИТЬ ПЕРЕИМЕНОВАНИЕ К СТАРОЙ ТАБЛИЦЕ
+# ============================================================
 
-rows = []
+df_old_renamed = df_old.copy()
 
-# Проверяем старые столбцы
-for old in old_cols:
-    new = mapping[old]
-    if new is None:
-        status = "deleted"
-    elif new == old:
-        status = "unchanged"
-    else:
-        status = "renamed"
-    rows.append({"old_column": old, "new_column": new, "status": status})
+for old_col, new_col in mapping.items():
+    if new_col is not None:
+        df_old_renamed.rename(columns={old_col: new_col}, inplace=True)
 
-# Проверяем добавленные новые столбцы
-for new in new_cols:
-    if new not in used_new_cols and new not in old_cols:
-        rows.append({"old_column": None, "new_column": new, "status": "added"})
 
-df_log = pd.DataFrame(rows)
+# Добавить префиксы для наглядности
+df_old_pref = df_old_renamed.add_prefix("old_")
+df_new_pref = df_new.add_prefix("new_")
 
-st.dataframe(df_log, use_container_width=True)
 
-# =====================================
-# STEP 5 — Скачивание результата
-# =====================================
+# ============================================================
+# ОБЪЕДИНЕНИЕ ОБЕИХ ТАБЛИЦ
+# ============================================================
 
-st.header("⬇ Скачать лог изменений")
+st.header("🔗 Объединение строк по Activity Master Number")
 
-def create_excel(df):
+merged_df = df_old_pref.merge(
+    df_new_pref,
+    left_on="old_Activity Master Number",
+    right_on="new_Activity Master Number",
+    how="outer",
+    indicator=True
+)
+
+
+# ============================================================
+# ЛОГИКА ОПРЕДЕЛЕНИЯ СТАТУСА СТРОКИ
+# ============================================================
+
+def row_status(row):
+    if row["_merge"] == "left_only":
+        return "deleted"
+    if row["_merge"] == "right_only":
+        return "new"
+
+    # общие колонки
+    common_cols = [
+        c.replace("old_", "")
+        for c in df_old_pref.columns
+        if c.replace("old_", "") in [x.replace("new_", "") for x in df_new_pref.columns]
+    ]
+
+    for col in common_cols:
+        old_val = row.get(f"old_{col}", np.nan)
+        new_val = row.get(f"new_{col}", np.nan)
+        if str(old_val).strip() != str(new_val).strip():
+            return "changed"
+
+    return "not_changed"
+
+
+merged_df["status"] = merged_df.apply(row_status, axis=1)
+
+status_col = merged_df.pop("status")
+merge_col = merged_df.pop("_merge")
+merged_df.insert(0, "status", status_col)
+merged_df.insert(1, "_merge", merge_col)
+
+st.success("Анализ изменений выполнен!")
+
+
+# ============================================================
+# ФИЛЬТР ПО СТАТУСУ
+# ============================================================
+
+st.header("🔎 Фильтр по статусу")
+
+status_filter = st.selectbox(
+    "Выберите статус",
+    ["all", "changed", "not_changed", "new", "deleted"]
+)
+
+if status_filter == "all":
+    filtered_df = merged_df
+else:
+    filtered_df = merged_df[merged_df["status"] == status_filter]
+
+
+# ============================================================
+# РЕДАКТИРУЕМАЯ ТАБЛИЦА
+# ============================================================
+
+st.header("📋 Таблица изменений (редактируемая)")
+
+gb = GridOptionsBuilder.from_dataframe(filtered_df)
+gb.configure_default_column(editable=True, wrapText=True, width=180)
+gb.configure_side_bar()
+grid_options = gb.build()
+
+grid_response = AgGrid(
+    filtered_df,
+    gridOptions=grid_options,
+    update_mode=GridUpdateMode.VALUE_CHANGED,
+    fit_columns_on_grid_load=False,
+    height=600
+)
+
+edited_df = pd.DataFrame(grid_response["data"])
+
+
+# ============================================================
+# СКАЧАТЬ В EXCEL
+# ============================================================
+
+st.header("⬇ Выгрузка результата")
+
+def download_excel(df):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="column_mapping", index=False)
+        df.to_excel(writer, index=False, sheet_name="merged")
     buffer.seek(0)
     return buffer
 
 st.download_button(
-    label="Скачать Excel",
-    data=create_excel(df_log),
-    file_name="column_mapping.xlsx",
+    label="Скачать объединённую таблицу",
+    data=download_excel(edited_df),
+    file_name="merged_status.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )

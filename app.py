@@ -73,19 +73,18 @@ if st.button("💾 Сохранить решение"):
 
 st.header("📄 Просмотр таблиц")
 
-selected = st.selectbox(
-    "Выберите таблицу",
-    [
-        "df_compare_nosymb",
-        "df_edit_before_db",
-        "log_edit",
-        "log_schema",
-        "df_raw_v1",
-        "df_raw_v2"
-    ]
-)
+tables = {
+    "df_compare_nosymb": df_compare,
+    "df_edit_before_db": df_edit_before_db,
+    "log_edit": log_edit,
+    "log_schema": log_schema,
+    "df_raw_v1": df_raw_v1,
+    "df_raw_v2": df_raw_v2
+}
 
-st.dataframe(eval(selected), use_container_width=True)
+selected = st.selectbox("Выберите таблицу", list(tables.keys()))
+
+st.dataframe(tables[selected], use_container_width=True)
 
 
 # ======================================================

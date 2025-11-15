@@ -2,13 +2,40 @@ import streamlit as st
 import pandas as pd
 import io
 
+def clean_excel_table(uploaded_file):
+    """Читает Excel-файл, находит строку с заголовками и возвращает очищенный DataFrame."""
+    # Читаем полностью без заголовков
+    df_all = pd.read_excel(uploaded_file, header=None)
+
+    # Ищем строку, где встречается "Activity Master Number"
+    header_row_idx = None
+    for i, row in df_all.iterrows():
+        if row.astype(str).str.contains("Activity Master Number", case=False, na=False).any():
+            header_row_idx = i
+            break
+
+    if header_row_idx is None:
+        st.error("❌ Не найдена строка с заголовком 'Activity Master Number'")
+        st.stop()
+
+    # Загружаем таблицу с правильного заголовка
+    df = pd.read_excel(uploaded_file, header=header_row_idx)
+
+    # Удаляем полностью пустые строки
+    df = df.dropna(how="all").reset_index(drop=True)
+
+    return df
+
+
 st.set_page_config(layout="wide", page_title="Column Mapping Tool")
 
 st.title("📊 Сопоставление столбцов старой и новой таблиц")
 
-# =====================================
-# STEP 1 — Загрузка старого и нового файла
-# =====================================
+# =========================
+# STEP 1 — FILE UPLOAD
+# =========================
+
+st.title("📊 Сопоставление столбцов старой и новой таблиц")
 
 col1, col2 = st.columns(2)
 
@@ -21,13 +48,36 @@ with col2:
 if not old_file or not new_file:
     st.stop()
 
-df_old = pd.read_excel(old_file)
-df_new = pd.read_excel(new_file)
+# =========================
+# CLEAN BOTH EXCEL FILES
+# =========================
+
+def clean_excel_table(uploaded_file):
+    """Читает Excel-файл, находит строку с заголовками и возвращает очищенный DataFrame."""
+    df_all = pd.read_excel(uploaded_file, header=None)
+
+    header_row_idx = None
+    for i, row in df_all.iterrows():
+        if row.astype(str).str.contains("Activity Master Number", case=False, na=False).any():
+            header_row_idx = i
+            break
+
+    if header_row_idx is None:
+        st.error("❌ Не найдена строка с заголовком 'Activity Master Number'")
+        st.stop()
+
+    df = pd.read_excel(uploaded_file, header=header_row_idx)
+    df = df.dropna(how="all").reset_index(drop=True)
+    return df
+
+# Применяем очистку
+df_old = clean_excel_table(old_file)
+df_new = clean_excel_table(new_file)
 
 old_cols = list(df_old.columns)
 new_cols = list(df_new.columns)
 
-st.success("Файлы успешно загружены.")
+st.success("Файлы успешно загружены и автоматически очищены.")
 
 # =====================================
 # STEP 2 — Объединённая таблица (чисто визуально)

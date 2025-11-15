@@ -1,16 +1,14 @@
 import streamlit as st
 import pandas as pd
-from streamlit_sortables import sort_items
 import io
 
 st.set_page_config(layout="wide", page_title="Column Mapping Tool")
 
-
-# =========================
-# STEP 1 — FILE UPLOAD
-# =========================
-
 st.title("📊 Сопоставление столбцов старой и новой таблиц")
+
+# =====================================
+# STEP 1 — Загрузка старого и нового файла
+# =====================================
 
 col1, col2 = st.columns(2)
 
@@ -23,11 +21,6 @@ with col2:
 if not old_file or not new_file:
     st.stop()
 
-
-# =========================
-# STEP 2 — LOAD DATA
-# =========================
-
 df_old = pd.read_excel(old_file)
 df_new = pd.read_excel(new_file)
 
@@ -36,90 +29,81 @@ new_cols = list(df_new.columns)
 
 st.success("Файлы успешно загружены.")
 
-# ====================================================
-# STEP 3 — MERGE TABLES (для визуального сравнения)
-# ====================================================
+# =====================================
+# STEP 2 — Объединённая таблица (чисто визуально)
+# =====================================
 
-st.header("🔎 Объединённая таблица (по Activity Master Number)")
+st.header("🔎 Объединённая таблица по Activity Master Number")
 
 if "Activity Master Number" in df_old.columns and "Activity Master Number" in df_new.columns:
     merged = df_old.merge(df_new, on="Activity Master Number", how="outer", suffixes=("_old", "_new"))
     st.dataframe(merged, use_container_width=True)
 else:
-    st.error("В обоих файлах должен быть столбец 'Activity Master Number'")
+    st.error("Оба файла должны содержать столбец 'Activity Master Number'")
     st.stop()
 
-
-# ==========================================
-# STEP 4 — COLUMN MAPPING (DRAG-AND-DROP)
-# ==========================================
+# =====================================
+# STEP 3 — Форма сопоставления столбцов
+# =====================================
 
 st.header("🧩 Сопоставление столбцов")
 
 st.markdown("""
-Перетягивайте элементы, чтобы сопоставить столбцы старой и новой таблиц.
-- Если столбцы совпадают → это *unchanged*
-- Если столбец старый не сопоставлен → *deleted*
-- Если столбец новый не сопоставлен → *added*
-- Если сопоставили разные имена → *renamed*
+Выберите, какой столбец из НОВОГО файла соответствует каждому столбцу из СТАРОГО файла.
+
+- Если не выбирать — столбец считается **удалённым**.
+- Если столбец из нового файла никто не выбрал — он считается **добавленным**.
+- Если выбрать столбец с таким же названием — **не изменён**.
+- Если выбрать другое название — **переименован**.
 """)
 
-col3, col4 = st.columns(2)
+mapping = {}
 
-with col3:
-    st.subheader("Старые столбцы (old)")
-    old_sorted = sort_items(old_cols, key="old_cols")
+for col in old_cols:
+    choice = st.selectbox(
+        f"Старый столбец: **{col}**",
+        options=["— Нет соответствия —"] + new_cols,
+        key=f"map_{col}"
+    )
+    mapping[col] = choice if choice != "— Нет соответствия —" else None
 
-with col4:
-    st.subheader("Новые столбцы (new)")
-    new_sorted = sort_items(new_cols, key="new_cols")
+# =====================================
+# STEP 4 — Анализ изменений
+# =====================================
 
-# результат сопоставления: позиции в списках
-mapping = list(zip(old_sorted, new_sorted))
+st.header("📘 Результат сопоставления")
 
+used_new_cols = set([v for v in mapping.values() if v is not None])
 
-# =======================================
-# STEP 5 — DETECT COLUMN CHANGES
-# =======================================
+rows = []
 
-result = []
-
-max_len = max(len(old_sorted), len(new_sorted))
-
-for i in range(max_len):
-    old_name = old_sorted[i] if i < len(old_sorted) else None
-    new_name = new_sorted[i] if i < len(new_sorted) else None
-
-    if old_name == new_name:
-        status = "unchanged"
-    elif old_name and not new_name:
+# Проверяем старые столбцы
+for old in old_cols:
+    new = mapping[old]
+    if new is None:
         status = "deleted"
-    elif new_name and not old_name:
-        status = "added"
+    elif new == old:
+        status = "unchanged"
     else:
         status = "renamed"
+    rows.append({"old_column": old, "new_column": new, "status": status})
 
-    result.append({
-        "old_column": old_name,
-        "new_column": new_name,
-        "status": status
-    })
+# Проверяем добавленные новые столбцы
+for new in new_cols:
+    if new not in used_new_cols and new not in old_cols:
+        rows.append({"old_column": None, "new_column": new, "status": "added"})
 
-df_log = pd.DataFrame(result)
+df_log = pd.DataFrame(rows)
 
-
-st.subheader("📘 Результат сопоставления")
 st.dataframe(df_log, use_container_width=True)
 
+# =====================================
+# STEP 5 — Скачивание результата
+# =====================================
 
+st.header("⬇ Скачать лог изменений")
 
-# =======================================
-# STEP 6 — DOWNLOAD LOG AS EXCEL
-# =======================================
-
-st.header("⬇ Выгрузка результата")
-
-def excel_download(df):
+def create_excel(df):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="column_mapping", index=False)
@@ -127,8 +111,8 @@ def excel_download(df):
     return buffer
 
 st.download_button(
-    "Скачать Excel",
-    data=excel_download(df_log),
+    label="Скачать Excel",
+    data=create_excel(df_log),
     file_name="column_mapping.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )

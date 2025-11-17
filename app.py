@@ -359,33 +359,34 @@ grid_df_before = view_df_visible.copy()
 selected_rows = grid_response["selected_rows"]  # список словарей выбранных строк
 
 # ============================================================
-# УДАЛЕНИЕ ВЫБРАННЫХ СТРОК
+# УДАЛЕНИЕ ВЫБРАННЫХ СТРОК (через _selectedRowNodeInfo)
 # ============================================================
 if delete_rows_clicked:
     merged_df_current = st.session_state["merged_df"].copy()
     indices_to_drop_rows = []
 
-    indices_to_drop_rows = []
-
     for row in selected_rows:
-        # row может быть dict, SimpleNamespace или список — попробуем 3 варианта
+        orig_idx = None
 
-        # 1) если row — dict
+        # selected_rows в st_aggrid обычно dict
         if isinstance(row, dict):
-            orig_idx = row.get("_orig_index")
 
-        # 2) если row — объект с атрибутами (SimpleNamespace)
-        elif hasattr(row, "_orig_index"):
-            orig_idx = getattr(row, "_orig_index")
+            # 1) пытаемся взять служебный индекс строки из _selectedRowNodeInfo
+            node_info = row.get("_selectedRowNodeInfo")
+            if isinstance(node_info, dict):
+                node_idx = node_info.get("nodeRowIndex", node_info.get("rowIndex"))
 
-        # 3) если row — список и порядок колонок — такой же, как в view_df_visible
-        else:
-            try:
-                colnames = list(view_df_visible.columns)
-                orig_idx = row[colnames.index("_orig_index")]
-            except:
-                orig_idx = None
+                if node_idx is not None and 0 <= node_idx < len(view_df_visible):
+                    try:
+                        orig_idx = view_df_visible.iloc[int(node_idx)]["_orig_index"]
+                    except Exception:
+                        orig_idx = None
 
+            # 2) запасной вариант: если вдруг _orig_index есть прямо в selected_rows
+            if orig_idx is None and "_orig_index" in row:
+                orig_idx = row.get("_orig_index")
+
+        # если индекс найден и он реально есть в merged_df_current
         if orig_idx is not None and orig_idx in merged_df_current.index:
             indices_to_drop_rows.append(orig_idx)
 
@@ -395,14 +396,17 @@ if delete_rows_clicked:
         st.warning("Нет выделенных строк для удаления.")
     else:
         df_before = merged_df_current.copy()
+
         for idx in indices_to_drop_rows:
             if idx not in df_before.index:
                 continue
+
             row_data = df_before.loc[idx].to_dict()
             row_id_val = (
                 row_data.get("old_Activity Master Number")
                 or row_data.get("new_Activity Master Number")
             )
+
             st.session_state["log_actions"].append({
                 "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "provider": provider_name,
@@ -419,7 +423,6 @@ if delete_rows_clicked:
         merged_df_current.reset_index(drop=True, inplace=True)
         st.session_state["merged_df"] = merged_df_current
         st.success(f"Удалено строк: {len(indices_to_drop_rows)}")
-
 
 # ============================================================
 # СОХРАНЕНИЕ ИЗМЕНЕНИЙ (ЯЧЕЙКИ + ПОПЫТКА ЗАХВАТИТЬ RENAME КОЛОНОК)

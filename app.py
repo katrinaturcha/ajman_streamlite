@@ -51,9 +51,6 @@ if "log_actions" not in st.session_state:
 if "merged_df" not in st.session_state:
     st.session_state["merged_df"] = None
 
-if "cols_editor_df" not in st.session_state:
-    st.session_state["cols_editor_df"] = None
-
 
 # ============================================================
 # UI: ЗАГРУЗКА ФАЙЛОВ
@@ -276,11 +273,9 @@ with st.sidebar:
     st.subheader("👁 Видимость столбцов")
     visible_cols = []
     for c in view_df.columns:
-        default_vis = True
-        vis = st.checkbox(c, value=default_vis, key=f"vis_{c}")
+        vis = st.checkbox(c, value=True, key=f"vis_{c}")
         if vis:
             visible_cols.append(c)
-
     if not visible_cols:
         st.warning("Не выбрано ни одного столбца — таблица будет пустой.")
 
@@ -296,6 +291,9 @@ view_df_visible["_orig_index"] = view_df_visible.index
 # ============================================================
 st.header("📋 Таблица (редактируемая)")
 
+# Кнопка УДАЛИТЬ ВЫБРАННЫЕ СТРОКИ – визуально над таблицей
+delete_rows_clicked = st.button("🗑 Удалить выбранные строки")
+
 gb = GridOptionsBuilder.from_dataframe(view_df_visible)
 gb.configure_default_column(
     editable=True,
@@ -305,15 +303,17 @@ gb.configure_default_column(
     wrapText=True,
 )
 
-# выбор строк чекбоксами, как в Jupyter
+# выбор строк только чекбоксами, как в Jupyter
 gb.configure_selection("multiple", use_checkbox=True)
 gb.configure_grid_options(
     enableRangeSelection=True,
     rowSelection="multiple",
-    suppressRowClickSelection=True,  # чтобы выделение только по чекбоксам
+    suppressRowClickSelection=True,
+    # включаем enterprise column menu с Rename / Delete / Hide / Sort / Filter
+    suppressMenuHide=False,
 )
 
-# делаем первый столбец с master-чекбоксом "выделить все"
+# первый столбец делаем с master-чекбоксом
 if len(view_df_visible.columns) > 0:
     first_col = view_df_visible.columns[0]
     gb.configure_column(
@@ -341,21 +341,13 @@ grid_df_after = pd.DataFrame(grid_response["data"])
 grid_df_before = view_df_visible.copy()
 selected_rows = grid_response["selected_rows"]  # список словарей выбранных строк
 
-
 # ============================================================
-# УДАЛЕНИЕ СТРОК
+# УДАЛЕНИЕ ВЫБРАННЫХ СТРОК
 # ============================================================
-st.subheader("🗑 Удаление строк")
-
-st.markdown(
-    "Используйте чекбоксы в первой колонке (и чекбокс в заголовке), "
-    "чтобы выбрать строки. Затем нажмите кнопку:"
-)
-
-if st.button("Удалить строки"):
+if delete_rows_clicked:
     merged_df_current = st.session_state["merged_df"].copy()
-
     indices_to_drop_rows = []
+
     for row in selected_rows:
         orig_idx = row.get("_orig_index")
         if orig_idx is not None and orig_idx in merged_df_current.index:
@@ -390,18 +382,18 @@ if st.button("Удалить строки"):
         merged_df_current.drop(index=indices_to_drop_rows, inplace=True)
         merged_df_current.reset_index(drop=True, inplace=True)
         st.session_state["merged_df"] = merged_df_current
-
         st.success(f"Удалено строк: {len(indices_to_drop_rows)}")
 
 
 # ============================================================
-# СОХРАНЕНИЕ ИЗМЕНЕНИЙ ЯЧЕЕК
+# СОХРАНЕНИЕ ИЗМЕНЕНИЙ (ЯЧЕЙКИ + ПОПЫТКА ЗАХВАТИТЬ RENAME КОЛОНОК)
 # ============================================================
-st.subheader("💾 Сохранить изменения в ячейках")
+st.header("💾 Сохранить изменения и выгрузить Excel")
 
-if st.button("Сохранить изменения в таблице"):
+if st.button("Сохранить изменения"):
     merged_df_current = st.session_state["merged_df"].copy()
 
+    # 1) изменения ячеек
     for i in grid_df_after.index:
         orig_idx = grid_df_after.loc[i, "_orig_index"]
         if orig_idx not in merged_df_current.index:
@@ -437,134 +429,44 @@ if st.button("Сохранить изменения в таблице"):
                     "manager_id": manager_id,
                 })
 
+    # 2) попытка считать переименования столбцов из grid_response
+    # (AGGrid хранит их в состоянии колонок; в st_aggrid может быть ключ "column_state" или "grid_state")
+    try:
+        col_state = grid_response.get("column_state") or grid_response.get("grid_state", {}).get("columnState")
+    except Exception:
+        col_state = None
+
+    if col_state:
+        rename_map = {}
+        for cs in col_state:
+            col_id = cs.get("colId")
+            header_name = cs.get("headerName")
+            if col_id and header_name and col_id in merged_df_current.columns:
+                if header_name != col_id:
+                    rename_map[col_id] = header_name
+
+        if rename_map:
+            for old_name, new_name in rename_map.items():
+                st.session_state["log_actions"].append({
+                    "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "provider": provider_name,
+                    "last_version": last_version,
+                    "row_id": None,
+                    "action": "rename_column",
+                    "column_name": old_name,
+                    "old_value": old_name,
+                    "new_value": new_name,
+                    "manager_id": manager_id,
+                })
+            merged_df_current.rename(columns=rename_map, inplace=True)
+
     st.session_state["merged_df"] = merged_df_current
-    st.success("Изменения в ячейках сохранены и залогированы.")
-
-
-# ============================================================
-# ВЫБОР СТОЛБЦОВ ДЛЯ УДАЛЕНИЯ И ПЕРЕИМЕНОВАНИЯ
-# ============================================================
-st.header("🧱 Выбор столбцов для удаления и переименования")
-
-merged_df_current = st.session_state["merged_df"]
-
-# инициализация/обновление редактора столбцов
-if (
-    st.session_state["cols_editor_df"] is None
-    or len(st.session_state["cols_editor_df"]) != len(merged_df_current.columns)
-):
-    st.session_state["cols_editor_df"] = pd.DataFrame({
-        "original_name": merged_df_current.columns.tolist(),
-        "new_name": merged_df_current.columns.tolist(),
-        "delete": [False] * len(merged_df_current.columns),
-    })
-
-cols_editor_df = st.session_state["cols_editor_df"]
-
-col_left, col_right = st.columns([1, 1])
-with col_left:
-    if st.button("Выделить все столбцы"):
-        cols_editor_df["delete"] = True
-        st.session_state["cols_editor_df"] = cols_editor_df
-with col_right:
-    if st.button("Удалить столбцы"):
-        merged_df_current = st.session_state["merged_df"].copy()
-        cols_editor_df = st.session_state["cols_editor_df"]
-        to_delete = cols_editor_df[cols_editor_df["delete"] == True]["original_name"].tolist()
-
-        if not to_delete:
-            st.warning("Нет выбранных столбцов для удаления.")
-        else:
-            deleted_count = 0
-            for c in to_delete:
-                if c in merged_df_current.columns:
-                    merged_df_current.drop(columns=[c], inplace=True)
-                    deleted_count += 1
-
-                    st.session_state["log_actions"].append({
-                        "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "provider": provider_name,
-                        "last_version": last_version,
-                        "row_id": None,
-                        "action": "delete_column",
-                        "column_name": c,
-                        "old_value": "COLUMN",
-                        "new_value": None,
-                        "manager_id": manager_id,
-                    })
-
-            st.success(f"Удалено столбцов: {deleted_count}")
-            st.session_state["merged_df"] = merged_df_current
-
-            # переинициализируем редактор столбцов после удаления
-            st.session_state["cols_editor_df"] = pd.DataFrame({
-                "original_name": merged_df_current.columns.tolist(),
-                "new_name": merged_df_current.columns.tolist(),
-                "delete": [False] * len(merged_df_current.columns),
-            })
-            cols_editor_df = st.session_state["cols_editor_df"]
-
-st.markdown("Дважды щёлкни по ячейке в колонке **Новое имя**, чтобы переименовать столбец.")
-
-gb_cols = GridOptionsBuilder.from_dataframe(cols_editor_df)
-gb_cols.configure_default_column(editable=True, resizable=True)
-gb_cols.configure_column("original_name", editable=False)
-gb_cols.configure_column("delete", editable=True)
-grid_options_cols = gb_cols.build()
-
-grid_cols_resp = AgGrid(
-    cols_editor_df,
-    gridOptions=grid_options_cols,
-    update_mode=GridUpdateMode.VALUE_CHANGED,
-    height=400,
-)
-
-edited_cols_df = pd.DataFrame(grid_cols_resp["data"])
-st.session_state["cols_editor_df"] = edited_cols_df
-
-if st.button("Применить переименования столбцов"):
-    merged_df_current = st.session_state["merged_df"].copy()
-    cols_editor_df = st.session_state["cols_editor_df"]
-
-    rename_map = {}
-    for _, row in cols_editor_df.iterrows():
-        orig = row["original_name"]
-        new = row["new_name"]
-        if orig != new:
-            rename_map[orig] = new
-            st.session_state["log_actions"].append({
-                "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "provider": provider_name,
-                "last_version": last_version,
-                "row_id": None,
-                "action": "rename_column",
-                "column_name": orig,
-                "old_value": orig,
-                "new_value": new,
-                "manager_id": manager_id,
-            })
-
-    if rename_map:
-        merged_df_current.rename(columns=rename_map, inplace=True)
-        st.session_state["merged_df"] = merged_df_current
-
-        # обновляем редактор столбцов после переименования
-        st.session_state["cols_editor_df"] = pd.DataFrame({
-            "original_name": merged_df_current.columns.tolist(),
-            "new_name": merged_df_current.columns.tolist(),
-            "delete": [False] * len(merged_df_current.columns),
-        })
-
-        st.success(f"Переименовано столбцов: {len(rename_map)}")
-    else:
-        st.info("Нет изменений в названиях столбцов.")
+    st.success("Все изменения сохранены и подготовлены к выгрузке.")
 
 
 # ============================================================
 # СКАЧАТЬ ОБЪЕДИНЁННУЮ ТАБЛИЦУ
 # ============================================================
-st.header("⬇ Выгрузка объединённой таблицы")
-
 def download_excel(df: pd.DataFrame):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -573,7 +475,7 @@ def download_excel(df: pd.DataFrame):
     return buffer
 
 st.download_button(
-    label="Скачать объединённую таблицу",
+    label="⬇ Скачать объединённую таблицу",
     data=download_excel(st.session_state["merged_df"]),
     file_name="merged_status.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

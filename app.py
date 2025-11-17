@@ -6,9 +6,8 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 
 st.set_page_config(layout="wide", page_title="AJMAN – Compare & Merge")
 
-
 # ============================================================
-# ФУНКЦИЯ ОЧИСТКИ ФАЙЛА (оставляем строго твою логику)
+# ФУНКЦИЯ ОЧИСТКИ ФАЙЛА
 # ============================================================
 def clean_excel_table(uploaded_file):
     """
@@ -33,18 +32,32 @@ def clean_excel_table(uploaded_file):
     else:
         df = pd.read_excel(uploaded_file, header=header_row_idx, dtype=object)
 
-    df = df.dropna(how="all")            # удалить пустые строки
-    df = df.dropna(axis=1, how="all")    # удалить пустые столбцы
+    df = df.dropna(how="all")          # удалить пустые строки
+    df = df.dropna(axis=1, how="all")  # удалить пустые столбцы
     df = df.reset_index(drop=True)
 
     return df
 
 
 # ============================================================
+# ИНИЦИАЛИЗАЦИЯ СОСТОЯНИЯ
+# ============================================================
+if "log_actions" not in st.session_state:
+    st.session_state["log_actions"] = []
+
+if "merged_df" not in st.session_state:
+    st.session_state["merged_df"] = None
+
+if "merged_df_original" not in st.session_state:
+    st.session_state["merged_df_original"] = None
+
+
+# ============================================================
 # UI: ЗАГРУЗКА ФАЙЛОВ
 # ============================================================
-
 st.title("📊 AJMAN — Сравнение, сопоставление и объединение таблиц")
+
+manager_id = st.text_input("Manager ID (для логов)", value="system")
 
 col1, col2 = st.columns(2)
 
@@ -57,13 +70,15 @@ with col2:
 if not old_file or not new_file:
     st.stop()
 
+provider_name = "ajman"
+last_version = old_file.name
+
 st.success("Файлы загружены! Идёт обработка...")
 
 
 # ============================================================
 # ЧИСТИМ ОБА ФАЙЛА
 # ============================================================
-
 df_old = clean_excel_table(old_file)
 df_new = clean_excel_table(new_file)
 
@@ -78,7 +93,6 @@ st.write(f"Новая таблица: {df_new.shape[0]} строк, {df_new.shap
 # ============================================================
 # СОПОСТАВЛЕНИЕ КОЛОНОК
 # ============================================================
-
 st.header("🧩 Сопоставление столбцов")
 
 st.markdown("Выберите, каким столбцам из НОВОГО файла соответствуют столбцы из СТАРОГО файла.")
@@ -95,23 +109,19 @@ for col in old_cols:
 
 st.success("Сопоставление колонок завершено!")
 
+
 # ============================================================
 # LOGGING COLUMN CHANGES (renamed / added / deleted)
 # ============================================================
-
 st.header("📘 Логирование изменений столбцов")
 
 log_rows = []
 current_date = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
-provider_name = "ajman"            # можно подставить переменную
-last_version = old_file.name        # или любую версию, которую хочешь логировать
 
-# 1. renamed + deleted (разбираем старые)
 used_new_cols = set()
 
 for old_col, new_col in mapping.items():
     if new_col is None:
-        # deleted
         log_rows.append({
             "date": current_date,
             "provider": provider_name,
@@ -122,12 +132,9 @@ for old_col, new_col in mapping.items():
         })
     else:
         used_new_cols.add(new_col)
-
         if new_col == old_col:
-            # unchanged — обычно не логируем
             continue
         else:
-            # renamed
             log_rows.append({
                 "date": current_date,
                 "provider": provider_name,
@@ -137,7 +144,6 @@ for old_col, new_col in mapping.items():
                 "new_column": new_col
             })
 
-# 2. added (новые колонки, которые никто не сопоставил)
 for col in new_cols:
     if col not in used_new_cols and col not in old_cols:
         log_rows.append({
@@ -149,14 +155,11 @@ for col in new_cols:
             "new_column": col
         })
 
-# преобразуем в таблицу
 df_log_columns = pd.DataFrame(log_rows)
 
 st.subheader("📄 Лог изменений столбцов")
 st.dataframe(df_log_columns, use_container_width=True)
 
-
-# ===== Кнопка СКАЧАТЬ ЛОГ =====
 
 def download_log(df):
     buffer = io.BytesIO()
@@ -165,6 +168,7 @@ def download_log(df):
     buffer.seek(0)
     return buffer
 
+
 st.download_button(
     label="⬇ Скачать лог изменений столбцов",
     data=download_log(df_log_columns),
@@ -172,18 +176,15 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
+
 # ============================================================
 # ПРИМЕНИТЬ ПЕРЕИМЕНОВАНИЕ К СТАРОЙ ТАБЛИЦЕ
 # ============================================================
-
 df_old_renamed = df_old.copy()
-
 for old_col, new_col in mapping.items():
     if new_col is not None:
         df_old_renamed.rename(columns={old_col: new_col}, inplace=True)
 
-
-# Добавить префиксы для наглядности
 df_old_pref = df_old_renamed.add_prefix("old_")
 df_new_pref = df_new.add_prefix("new_")
 
@@ -191,7 +192,6 @@ df_new_pref = df_new.add_prefix("new_")
 # ============================================================
 # ОБЪЕДИНЕНИЕ ОБЕИХ ТАБЛИЦ
 # ============================================================
-
 st.header("🔗 Объединение строк по Activity Master Number")
 
 merged_df = df_old_pref.merge(
@@ -204,32 +204,48 @@ merged_df = df_old_pref.merge(
 
 
 # ============================================================
-# ЛОГИКА ОПРЕДЕЛЕНИЯ СТАТУСА СТРОКИ
+# СТАТУС + ИЗМЕНЁННЫЕ СТОЛБЦЫ
 # ============================================================
-
-def row_status(row):
+def compare_row_changes(row, common_cols):
+    """
+    Возвращает:
+    - статус строки
+    - строку 'измененные столбцы' (через запятую) или None
+    """
     if row["_merge"] == "left_only":
-        return "deleted"
+        return "deleted", None
     if row["_merge"] == "right_only":
-        return "new"
+        return "new", None
 
-    # общие колонки
-    common_cols = [
-        c.replace("old_", "")
-        for c in df_old_pref.columns
-        if c.replace("old_", "") in [x.replace("new_", "") for x in df_new_pref.columns]
-    ]
-
+    changed_cols = []
     for col in common_cols:
         old_val = row.get(f"old_{col}", np.nan)
         new_val = row.get(f"new_{col}", np.nan)
         if str(old_val).strip() != str(new_val).strip():
-            return "changed"
+            changed_cols.append(col)
 
-    return "not_changed"
+    if changed_cols:
+        return "changed", ", ".join(changed_cols)
+
+    return "not_changed", None
 
 
-merged_df["status"] = merged_df.apply(row_status, axis=1)
+common_cols = [
+    c.replace("old_", "")
+    for c in df_old_pref.columns
+    if c.replace("old_", "") in [x.replace("new_", "") for x in df_new_pref.columns]
+]
+
+statuses = []
+changed_cols_list = []
+
+for _, r in merged_df.iterrows():
+    s, cols = compare_row_changes(r, common_cols)
+    statuses.append(s)
+    changed_cols_list.append(cols)
+
+merged_df["status"] = statuses
+merged_df["измененные столбцы"] = changed_cols_list
 
 status_col = merged_df.pop("status")
 merge_col = merged_df.pop("_merge")
@@ -240,9 +256,17 @@ st.success("Анализ изменений выполнен!")
 
 
 # ============================================================
+# СОХРАНИМ BASE-DATAFRAME В SESSION_STATE
+# ============================================================
+# (чтобы редактировать и логировать изменения)
+st.session_state["merged_df"] = merged_df.copy()
+if st.session_state["merged_df_original"] is None:
+    st.session_state["merged_df_original"] = merged_df.copy()
+
+
+# ============================================================
 # ФИЛЬТР ПО СТАТУСУ
 # ============================================================
-
 st.header("🔎 Фильтр по статусу")
 
 status_filter = st.selectbox(
@@ -250,17 +274,139 @@ status_filter = st.selectbox(
     ["all", "changed", "not_changed", "new", "deleted"]
 )
 
+full_df = st.session_state["merged_df"]
+
 if status_filter == "all":
-    filtered_df = merged_df
+    filtered_df = full_df
 else:
-    filtered_df = merged_df[merged_df["status"] == status_filter]
+    filtered_df = full_df[full_df["status"] == status_filter]
 
 
 # ============================================================
-# РЕДАКТИРУЕМАЯ ТАБЛИЦА
+# РЕДАКТИРОВАНИЕ: ПЕРЕИМЕНОВАНИЕ / УДАЛЕНИЕ СТОЛБЦОВ / УДАЛЕНИЕ СТРОК
 # ============================================================
+st.header("✏ Редактирование структуры таблицы")
 
+# --- Переименование столбца ---
+st.subheader("Переименовать столбец")
+
+col_rename_from = st.selectbox("Выбрать столбец для переименования", full_df.columns.tolist())
+new_name = st.text_input("Новое имя столбца", key="rename_input")
+
+if st.button("Переименовать столбец"):
+    if new_name and new_name not in full_df.columns:
+        old_name = col_rename_from
+        st.session_state["merged_df"].rename(columns={old_name: new_name}, inplace=True)
+
+        st.session_state["log_actions"].append({
+            "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "provider": provider_name,
+            "last_version": last_version,
+            "row_id": None,
+            "action": "rename_column",
+            "column_name": old_name,
+            "old_value": old_name,
+            "new_value": new_name,
+            "manager_id": manager_id,
+        })
+
+        st.success(f"Столбец '{old_name}' переименован в '{new_name}'")
+    else:
+        st.warning("Укажите уникальное новое имя столбца.")
+
+full_df = st.session_state["merged_df"]
+if status_filter == "all":
+    filtered_df = full_df
+else:
+    filtered_df = full_df[full_df["status"] == status_filter]
+
+
+# --- Удаление столбцов ---
+st.subheader("Удалить столбцы")
+
+select_all_cols = st.checkbox("Выделить все столбцы для удаления")
+if select_all_cols:
+    cols_to_delete = full_df.columns.tolist()
+else:
+    cols_to_delete = st.multiselect("Выберите столбцы для удаления", full_df.columns.tolist())
+
+if st.button("Удалить столбцы"):
+    for c in cols_to_delete:
+        if c in st.session_state["merged_df"].columns:
+            st.session_state["merged_df"].drop(columns=[c], inplace=True)
+
+            st.session_state["log_actions"].append({
+                "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "provider": provider_name,
+                "last_version": last_version,
+                "row_id": None,
+                "action": "delete_column",
+                "column_name": c,
+                "old_value": "COLUMN",
+                "new_value": None,
+                "manager_id": manager_id,
+            })
+
+    st.success(f"Удалено столбцов: {len(cols_to_delete)}")
+
+full_df = st.session_state["merged_df"]
+if status_filter == "all":
+    filtered_df = full_df
+else:
+    filtered_df = full_df[full_df["status"] == status_filter]
+
+
+# --- Удаление строк ---
+st.subheader("Удалить строки")
+
+select_all_rows = st.checkbox("Выделить все строки для удаления")
+if select_all_rows:
+    rows_to_delete = filtered_df.index.tolist()
+else:
+    rows_to_delete = st.multiselect("Выберите индексы строк для удаления", filtered_df.index.tolist())
+
+if st.button("Удалить строки"):
+    df_before = st.session_state["merged_df"].copy()
+    for r in rows_to_delete:
+        if r in st.session_state["merged_df"].index:
+            row_before = df_before.loc[r]
+
+            row_id_val = None
+            if "old_Activity Master Number" in df_before.columns:
+                row_id_val = row_before.get("old_Activity Master Number", None)
+            elif "new_Activity Master Number" in df_before.columns:
+                row_id_val = row_before.get("new_Activity Master Number", None)
+
+            st.session_state["log_actions"].append({
+                "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "provider": provider_name,
+                "last_version": last_version,
+                "row_id": row_id_val,
+                "action": "delete_row",
+                "column_name": None,
+                "old_value": row_before.to_dict(),
+                "new_value": None,
+                "manager_id": manager_id,
+            })
+
+    st.session_state["merged_df"].drop(index=rows_to_delete, inplace=True)
+    st.session_state["merged_df"].reset_index(drop=True, inplace=True)
+    st.success(f"Удалено строк: {len(rows_to_delete)}")
+
+full_df = st.session_state["merged_df"]
+if status_filter == "all":
+    filtered_df = full_df
+else:
+    filtered_df = full_df[full_df["status"] == status_filter]
+
+
+# ============================================================
+# РЕДАКТИРУЕМАЯ ТАБЛИЦА (ЯЧЕЙКИ)
+# ============================================================
 st.header("📋 Таблица изменений (редактируемая)")
+
+# Сохраняем исходное состояние текущего фильтра для сравнения после редактирования
+df_before_grid = filtered_df.copy()
 
 gb = GridOptionsBuilder.from_dataframe(filtered_df)
 gb.configure_default_column(editable=True, wrapText=True, width=180)
@@ -268,20 +414,58 @@ gb.configure_side_bar()
 grid_options = gb.build()
 
 grid_response = AgGrid(
-    filtered_df,
+    df_before_grid,
     gridOptions=grid_options,
-    update_mode=GridUpdateMode.VALUE_CHANGED,
+    update_mode=GridUpdateMode.NO_UPDATE,
     fit_columns_on_grid_load=False,
     height=600
 )
 
-edited_df = pd.DataFrame(grid_response["data"])
+edited_df_view = pd.DataFrame(grid_response["data"])
 
 
 # ============================================================
-# СКАЧАТЬ В EXCEL
+# КНОПКА "СОХРАНИТЬ" — ЛОГИРУЕМ ЯЧЕЙЧНЫЕ ИЗМЕНЕНИЯ
 # ============================================================
+st.subheader("💾 Сохранение изменений")
 
+if st.button("Сохранить изменения"):
+    # сравниваем df_before_grid и edited_df_view
+    for idx in edited_df_view.index:
+        for col in edited_df_view.columns:
+            old_val = df_before_grid.loc[idx, col]
+            new_val = edited_df_view.loc[idx, col]
+            if pd.isna(old_val) and pd.isna(new_val):
+                continue
+            if str(old_val) != str(new_val):
+                # обновляем в основном merged_df
+                if idx in st.session_state["merged_df"].index:
+                    st.session_state["merged_df"].loc[idx, col] = new_val
+
+                row_id_val = None
+                if "old_Activity Master Number" in st.session_state["merged_df"].columns:
+                    row_id_val = st.session_state["merged_df"].loc[idx].get("old_Activity Master Number", None)
+                elif "new_Activity Master Number" in st.session_state["merged_df"].columns:
+                    row_id_val = st.session_state["merged_df"].loc[idx].get("new_Activity Master Number", None)
+
+                st.session_state["log_actions"].append({
+                    "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "provider": provider_name,
+                    "last_version": last_version,
+                    "row_id": row_id_val,
+                    "action": "edit_cell",
+                    "column_name": col,
+                    "old_value": old_val,
+                    "new_value": new_val,
+                    "manager_id": manager_id,
+                })
+
+    st.success("Изменения по ячейкам сохранены и залогированы.")
+
+
+# ============================================================
+# СКАЧАТЬ ОБЪЕДИНЁННУЮ ТАБЛИЦУ
+# ============================================================
 st.header("⬇ Выгрузка результата")
 
 def download_excel(df):
@@ -293,7 +477,33 @@ def download_excel(df):
 
 st.download_button(
     label="Скачать объединённую таблицу",
-    data=download_excel(edited_df),
+    data=download_excel(st.session_state["merged_df"]),
     file_name="merged_status.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+
+# ============================================================
+# ЛОГ ДЕЙСТВИЙ МЕНЕДЖЕРА
+# ============================================================
+st.header("📘 Лог действий менеджера")
+
+df_log_actions = pd.DataFrame(st.session_state["log_actions"])
+if not df_log_actions.empty:
+    st.dataframe(df_log_actions, use_container_width=True)
+else:
+    st.info("Пока нет зафиксированных действий менеджера.")
+
+def download_log_actions(df):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="log_edit")
+    buffer.seek(0)
+    return buffer
+
+st.download_button(
+    label="⬇ Скачать лог действий менеджера",
+    data=download_log_actions(df_log_actions),
+    file_name="log_edit.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )

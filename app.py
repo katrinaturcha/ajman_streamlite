@@ -95,6 +95,82 @@ for col in old_cols:
 
 st.success("Сопоставление колонок завершено!")
 
+# ============================================================
+# LOGGING COLUMN CHANGES (renamed / added / deleted)
+# ============================================================
+
+st.header("📘 Логирование изменений столбцов")
+
+log_rows = []
+current_date = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+provider_name = "ajman"            # можно подставить переменную
+last_version = old_file.name        # или любую версию, которую хочешь логировать
+
+# 1. renamed + deleted (разбираем старые)
+used_new_cols = set()
+
+for old_col, new_col in mapping.items():
+    if new_col is None:
+        # deleted
+        log_rows.append({
+            "date": current_date,
+            "provider": provider_name,
+            "last_version": last_version,
+            "event": "deleted",
+            "old_column": old_col,
+            "new_column": None
+        })
+    else:
+        used_new_cols.add(new_col)
+
+        if new_col == old_col:
+            # unchanged — обычно не логируем
+            continue
+        else:
+            # renamed
+            log_rows.append({
+                "date": current_date,
+                "provider": provider_name,
+                "last_version": last_version,
+                "event": "renamed",
+                "old_column": old_col,
+                "new_column": new_col
+            })
+
+# 2. added (новые колонки, которые никто не сопоставил)
+for col in new_cols:
+    if col not in used_new_cols and col not in old_cols:
+        log_rows.append({
+            "date": current_date,
+            "provider": provider_name,
+            "last_version": last_version,
+            "event": "added",
+            "old_column": None,
+            "new_column": col
+        })
+
+# преобразуем в таблицу
+df_log_columns = pd.DataFrame(log_rows)
+
+st.subheader("📄 Лог изменений столбцов")
+st.dataframe(df_log_columns, use_container_width=True)
+
+
+# ===== Кнопка СКАЧАТЬ ЛОГ =====
+
+def download_log(df):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="log_schema")
+    buffer.seek(0)
+    return buffer
+
+st.download_button(
+    label="⬇ Скачать лог изменений столбцов",
+    data=download_log(df_log_columns),
+    file_name="log_schema.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
 
 # ============================================================
 # ПРИМЕНИТЬ ПЕРЕИМЕНОВАНИЕ К СТАРОЙ ТАБЛИЦЕ

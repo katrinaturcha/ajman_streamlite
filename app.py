@@ -365,8 +365,27 @@ if delete_rows_clicked:
     merged_df_current = st.session_state["merged_df"].copy()
     indices_to_drop_rows = []
 
+    indices_to_drop_rows = []
+
     for row in selected_rows:
-        orig_idx = row.get("_orig_index")
+        # row может быть dict, SimpleNamespace или список — попробуем 3 варианта
+
+        # 1) если row — dict
+        if isinstance(row, dict):
+            orig_idx = row.get("_orig_index")
+
+        # 2) если row — объект с атрибутами (SimpleNamespace)
+        elif hasattr(row, "_orig_index"):
+            orig_idx = getattr(row, "_orig_index")
+
+        # 3) если row — список и порядок колонок — такой же, как в view_df_visible
+        else:
+            try:
+                colnames = list(view_df_visible.columns)
+                orig_idx = row[colnames.index("_orig_index")]
+            except:
+                orig_idx = None
+
         if orig_idx is not None and orig_idx in merged_df_current.index:
             indices_to_drop_rows.append(orig_idx)
 

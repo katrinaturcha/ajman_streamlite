@@ -20,7 +20,9 @@ def clean_excel_table(uploaded_file):
 
     header_row_idx = None
     for i, row in df_all.iterrows():
-        if row.astype(str).str.contains("Activity Master Number", case=False, na=False).any():
+        if row.astype(str).str.contains(
+            "Activity Master Number", case=False, na=False
+        ).any():
             header_row_idx = i
             break
 
@@ -48,6 +50,12 @@ if "log_actions" not in st.session_state:
 
 if "merged_df" not in st.session_state:
     st.session_state["merged_df"] = None
+
+if "selected_rows_filtered" not in st.session_state:
+    st.session_state["selected_rows_filtered"] = []
+
+if "cols_selected" not in st.session_state:
+    st.session_state["cols_selected"] = {}
 
 
 # ============================================================
@@ -247,7 +255,7 @@ st.session_state["merged_df"] = merged_df.copy()
 
 
 # ============================================================
-# ФИЛЬТР ПО СТАТУСУ + "ВЫДЕЛИТЬ ВСЕ"
+# ФИЛЬТР ПО СТАТУСУ
 # ============================================================
 st.header("🔎 Фильтр по статусу")
 
@@ -263,22 +271,50 @@ if status_filter == "all":
 else:
     view_df = base_df[base_df["status"] == status_filter].copy()
 
-st.subheader("✨ Быстрое выделение для удаления")
-delete_all_rows_flag = st.checkbox("Удалить все строки по текущему фильтру")
 
-# для столбцов у нас уже есть ниже чекбокс "Выделить все столбцы для удаления"
+# ============================================================
+# САЙДБАР: ВИДИМОСТЬ СТОЛБЦОВ ("CHOOSE COLUMNS")
+# ============================================================
+with st.sidebar:
+    st.subheader("👁 Видимость столбцов")
+    visible_cols = []
+    for c in view_df.columns:
+        default_vis = True
+        vis = st.checkbox(c, value=default_vis, key=f"vis_{c}")
+        if vis:
+            visible_cols.append(c)
+
+    if not visible_cols:
+        st.warning("Не выбрано ни одного столбца — таблица будет пустой.")
+
+view_df_visible = view_df[visible_cols] if visible_cols else view_df.iloc[:, :0]
+
+# служебный столбец для связи с merged_df
+view_df_visible = view_df_visible.copy()
+view_df_visible["_orig_index"] = view_df_visible.index
+
+# ============================================================
+# БЫСТРОЕ ВЫДЕЛЕНИЕ СТРОК ПО ФИЛЬТРУ
+# ============================================================
+st.subheader("✨ Быстрое выделение строк")
+
+select_all_rows_flag = st.checkbox(
+    "Выделить все строки по текущему фильтру",
+    key="select_all_rows",
+)
+
+if select_all_rows_flag:
+    st.session_state["selected_rows_filtered"] = view_df.index.tolist()
+else:
+    st.session_state["selected_rows_filtered"] = []
 
 
 # ============================================================
-# РЕДАКТИРУЕМАЯ ТАБЛИЦА (AGGrid)
+# ТАБЛИЦА (AGGrid, редактируема)
 # ============================================================
 st.header("📋 Таблица (редактируемая)")
 
-# служебный столбец с индексом оригинальной merged_df
-view_df_for_grid = view_df.copy()
-view_df_for_grid["_orig_index"] = view_df_for_grid.index
-
-gb = GridOptionsBuilder.from_dataframe(view_df_for_grid)
+gb = GridOptionsBuilder.from_dataframe(view_df_visible)
 gb.configure_default_column(
     editable=True,
     filter="agTextColumnFilter",
@@ -293,147 +329,154 @@ gb.configure_column("_orig_index", hide=True)
 grid_options = gb.build()
 
 grid_response = AgGrid(
-    view_df_for_grid,
+    view_df_visible,
     gridOptions=grid_options,
     update_mode=GridUpdateMode.VALUE_CHANGED | GridUpdateMode.SELECTION_CHANGED,
     allow_unsafe_jscode=True,
     enable_enterprise_modules=True,
-    height=600,
+    height=650,
 )
 
 grid_df_after = pd.DataFrame(grid_response["data"])
-grid_df_before = view_df_for_grid.copy()
+grid_df_before = view_df_visible.copy()
 selected_rows = grid_response["selected_rows"]
 
 
 # ============================================================
-# УДАЛЕНИЕ СТРОК
+# ВЫБОР СТОЛБЦОВ ДЛЯ УДАЛЕНИЯ (СНИЗУ ТАБЛИЦЫ)
 # ============================================================
-st.subheader("🗑 Удаление строк")
+st.subheader("🧱 Выбор столбцов для удаления")
 
-if st.button("Удалить строки"):
+full_df = st.session_state["merged_df"]
+
+# инициализация структуры выбранных столбцов
+for col in full_df.columns:
+    if col not in st.session_state["cols_selected"]:
+        st.session_state["cols_selected"][col] = False
+
+cols_for_delete = []
+
+cols_row = st.columns(3)
+with cols_row[0]:
+    if st.button("Выделить все столбцы"):
+        for col in full_df.columns:
+            st.session_state["cols_selected"][col] = True
+
+with cols_row[1]:
+    if st.button("Снять выделение столбцов"):
+        for col in full_df.columns:
+            st.session_state["cols_selected"][col] = False
+
+st.markdown("Выберите столбцы (галочками), которые хотите удалить:")
+
+for col in full_df.columns:
+    # не даём случайно удалить служебный столбец индекса, которого нет
+    checked = st.checkbox(
+        col,
+        value=st.session_state["cols_selected"][col],
+        key=f"delcol_{col}",
+    )
+    st.session_state["cols_selected"][col] = checked
+    if checked:
+        cols_for_delete.append(col)
+
+
+# ============================================================
+# УНИВЕРСАЛЬНАЯ КНОПКА "УДАЛИТЬ ВЫДЕЛЕННОЕ"
+# ============================================================
+st.subheader("🗑 Удалить выделенное")
+
+if st.button("Удалить выделенное"):
     merged_df_current = st.session_state["merged_df"].copy()
 
-    indices_to_drop = []
+    # --- 1. Определяем выбранные строки ---
+    indices_to_drop_rows = []
 
-    if delete_all_rows_flag:
-        # удалить все строки текущего фильтра
-        indices_to_drop = view_df.index.tolist()
+    if st.session_state["selected_rows_filtered"]:
+        indices_to_drop_rows = st.session_state["selected_rows_filtered"]
     else:
-        # удалить только выделенные в таблице
         for row in selected_rows:
             orig_idx = row.get("_orig_index")
             if orig_idx is not None and orig_idx in merged_df_current.index:
-                indices_to_drop.append(orig_idx)
+                indices_to_drop_rows.append(orig_idx)
 
-    indices_to_drop = sorted(set(indices_to_drop))
+    indices_to_drop_rows = sorted(set(indices_to_drop_rows))
 
-    if not indices_to_drop:
-        st.warning("Нет строк для удаления (ни выбрано, ни по фильтру).")
+    # --- 2. Определяем выбранные столбцы ---
+    cols_to_drop = [c for c in full_df.columns if st.session_state["cols_selected"].get(c)]
+
+    # --- 3. Логика: что именно удаляем ---
+    if indices_to_drop_rows and cols_to_drop:
+        st.warning("Нельзя одновременно удалять и строки, и столбцы. Снимите одну из групп выделений.")
+    elif not indices_to_drop_rows and not cols_to_drop:
+        st.warning("Ничего не выбрано для удаления.")
     else:
-        df_before_del = merged_df_current.copy()
+        # Удаление строк
+        if indices_to_drop_rows:
+            df_before = merged_df_current.copy()
+            for idx in indices_to_drop_rows:
+                if idx not in df_before.index:
+                    continue
+                row_data = df_before.loc[idx].to_dict()
+                row_id_val = (
+                    row_data.get("old_Activity Master Number")
+                    or row_data.get("new_Activity Master Number")
+                )
+                st.session_state["log_actions"].append({
+                    "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "provider": provider_name,
+                    "last_version": last_version,
+                    "row_id": row_id_val,
+                    "action": "delete_row",
+                    "column_name": None,
+                    "old_value": row_data,
+                    "new_value": None,
+                    "manager_id": manager_id,
+                })
 
-        for idx in indices_to_drop:
-            row_data = df_before_del.loc[idx].to_dict()
-            row_id_val = (
-                row_data.get("old_Activity Master Number")
-                or row_data.get("new_Activity Master Number")
-            )
+            merged_df_current.drop(index=indices_to_drop_rows, inplace=True)
+            merged_df_current.reset_index(drop=True, inplace=True)
+            st.success(f"Удалено строк: {len(indices_to_drop_rows)}")
 
-            st.session_state["log_actions"].append({
-                "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "provider": provider_name,
-                "last_version": last_version,
-                "row_id": row_id_val,
-                "action": "delete_row",
-                "column_name": None,
-                "old_value": row_data,
-                "new_value": None,
-                "manager_id": manager_id,
-            })
+        # Удаление столбцов
+        if cols_to_drop:
+            deleted_count = 0
+            for c in cols_to_drop:
+                if c in merged_df_current.columns:
+                    merged_df_current.drop(columns=[c], inplace=True)
+                    deleted_count += 1
 
-        merged_df_current.drop(index=indices_to_drop, inplace=True)
-        merged_df_current.reset_index(drop=True, inplace=True)
+                    st.session_state["log_actions"].append({
+                        "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "provider": provider_name,
+                        "last_version": last_version,
+                        "row_id": None,
+                        "action": "delete_column",
+                        "column_name": c,
+                        "old_value": "COLUMN",
+                        "new_value": None,
+                        "manager_id": manager_id,
+                    })
+
+            st.success(f"Удалено столбцов: {deleted_count}")
+
+        # обновляем merged_df
         st.session_state["merged_df"] = merged_df_current
 
-        st.success(f"Удалено строк: {len(indices_to_drop)}")
+        # сбрасываем выбор столбцов
+        for c in st.session_state["cols_selected"]:
+            st.session_state["cols_selected"][c] = False
 
-
-# ============================================================
-# ПЕРЕИМЕНОВАНИЕ / УДАЛЕНИЕ СТОЛБЦОВ
-# ============================================================
-st.header("✏ Редактирование структуры (столбцы)")
-
-full_df = st.session_state["merged_df"]
-
-# --- Переименование столбца ---
-st.subheader("Переименовать столбец")
-
-col_to_rename = st.selectbox("Столбец для переименования", full_df.columns.tolist())
-new_col_name = st.text_input("Новое имя столбца", key="rename_col_input")
-
-if st.button("Переименовать столбец"):
-    if new_col_name and new_col_name not in full_df.columns:
-        old_name = col_to_rename
-        st.session_state["merged_df"].rename(columns={old_name: new_col_name}, inplace=True)
-
-        st.session_state["log_actions"].append({
-            "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "provider": provider_name,
-            "last_version": last_version,
-            "row_id": None,
-            "action": "rename_column",
-            "column_name": old_name,
-            "old_value": old_name,
-            "new_value": new_col_name,
-            "manager_id": manager_id,
-        })
-
-        st.success(f"Столбец '{old_name}' переименован в '{new_col_name}'")
-    else:
-        st.warning("Укажите уникальное новое имя столбца.")
-
-full_df = st.session_state["merged_df"]
-
-# --- Удаление столбцов ---
-st.subheader("Удалить столбцы")
-
-select_all_cols = st.checkbox("Выделить все столбцы для удаления")
-if select_all_cols:
-    cols_to_delete = full_df.columns.tolist()
-else:
-    cols_to_delete = st.multiselect("Выберите столбцы для удаления", full_df.columns.tolist())
-
-if st.button("Удалить столбцы"):
-    merged_df_current = st.session_state["merged_df"].copy()
-    deleted_count = 0
-    for c in cols_to_delete:
-        if c in merged_df_current.columns:
-            merged_df_current.drop(columns=[c], inplace=True)
-            deleted_count += 1
-
-            st.session_state["log_actions"].append({
-                "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "provider": provider_name,
-                "last_version": last_version,
-                "row_id": None,
-                "action": "delete_column",
-                "column_name": c,
-                "old_value": "COLUMN",
-                "new_value": None,
-                "manager_id": manager_id,
-            })
-
-    st.session_state["merged_df"] = merged_df_current
-    st.success(f"Удалено столбцов: {deleted_count}")
+        # сбрасываем выбор строк
+        st.session_state["selected_rows_filtered"] = []
 
 
 # ============================================================
 # СОХРАНЕНИЕ ИЗМЕНЕНИЙ ЯЧЕЕК
 # ============================================================
-st.subheader("💾 Сохранить изменения в таблице")
+st.subheader("💾 Сохранить изменения в ячейках")
 
-if st.button("Сохранить изменения в ячейках"):
+if st.button("Сохранить изменения в таблице"):
     merged_df_current = st.session_state["merged_df"].copy()
 
     for i in grid_df_after.index:

@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import io
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
+from st_aggrid.shared import JsCode
+
 
 st.set_page_config(layout="wide", page_title="AJMAN – Compare & Merge")
 

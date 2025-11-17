@@ -243,12 +243,11 @@ merged_df.insert(1, "_merge", merge_col)
 
 st.success("Анализ изменений выполнен!")
 
-# Сохраняем в состояние (будем дальше редактировать)
 st.session_state["merged_df"] = merged_df.copy()
 
 
 # ============================================================
-# ФИЛЬТР ПО СТАТУСУ
+# ФИЛЬТР ПО СТАТУСУ + "ВЫДЕЛИТЬ ВСЕ"
 # ============================================================
 st.header("🔎 Фильтр по статусу")
 
@@ -258,38 +257,24 @@ status_filter = st.selectbox(
 )
 
 base_df = st.session_state["merged_df"]
+
 if status_filter == "all":
     view_df = base_df.copy()
 else:
     view_df = base_df[base_df["status"] == status_filter].copy()
 
-# ============================================================
-# ДОП. ФУНКЦИИ: ВЫДЕЛИТЬ ВСЕ СТРОКИ / ВЫДЕЛИТЬ ВСЕ СТОЛБЦЫ
-# ============================================================
+st.subheader("✨ Быстрое выделение для удаления")
+delete_all_rows_flag = st.checkbox("Удалить все строки по текущему фильтру")
 
-st.subheader("✨ Быстрое выделение")
+# для столбцов у нас уже есть ниже чекбокс "Выделить все столбцы для удаления"
 
-# --- ВЫДЕЛИТЬ ВСЕ СТРОКИ ---
-if st.button("Выделить все строки"):
-    st.session_state["selected_all_rows"] = filtered_df.index.tolist()
-else:
-    if "selected_all_rows" not in st.session_state:
-        st.session_state["selected_all_rows"] = []
-
-# --- ВЫДЕЛИТЬ ВСЕ СТОЛБЦЫ ---
-if st.button("Выделить все столбцы"):
-    st.session_state["selected_all_cols"] = filtered_df.columns.tolist()
-else:
-    if "selected_all_cols" not in st.session_state:
-        st.session_state["selected_all_cols"] = []
 
 # ============================================================
-# РЕДАКТИРУЕМАЯ ТАБЛИЦА (как Google Sheets)
+# РЕДАКТИРУЕМАЯ ТАБЛИЦА (AGGrid)
 # ============================================================
 st.header("📋 Таблица (редактируемая)")
 
-# Добавляем скрытый столбец с оригинальным индексом merged_df,
-# чтобы можно было правильно обновить и удалять строки
+# служебный столбец с индексом оригинальной merged_df
 view_df_for_grid = view_df.copy()
 view_df_for_grid["_orig_index"] = view_df_for_grid.index
 
@@ -303,7 +288,6 @@ gb.configure_default_column(
 )
 gb.configure_selection("multiple", use_checkbox=True)
 gb.configure_grid_options(enableRangeSelection=True, rowSelection="multiple")
-# Скрыть служебный столбец из UI
 gb.configure_column("_orig_index", hide=True)
 
 grid_options = gb.build()
@@ -317,37 +301,156 @@ grid_response = AgGrid(
     height=600,
 )
 
-grid_df = pd.DataFrame(grid_response["data"])      # текущее состояние таблицы
-grid_df_before = view_df_for_grid.copy()           # до изменений
-selected_rows = grid_response["selected_rows"]     # список словарей выбранных строк
+grid_df_after = pd.DataFrame(grid_response["data"])
+grid_df_before = view_df_for_grid.copy()
+selected_rows = grid_response["selected_rows"]
 
 
 # ============================================================
-# КНОПКА "СОХРАНИТЬ ИЗМЕНЕНИЯ" — ЛОГИРУЕМ ИЗМЕНЕНИЯ ЯЧЕЕК
+# УДАЛЕНИЕ СТРОК
 # ============================================================
-st.subheader("💾 Сохранить изменения в ячейках")
+st.subheader("🗑 Удаление строк")
 
-if st.button("Сохранить изменения в таблице"):
+if st.button("Удалить строки"):
     merged_df_current = st.session_state["merged_df"].copy()
 
-    # сравниваем состояние до/после внутри текущего фильтра
-    for i in grid_df.index:
-        orig_idx = grid_df.loc[i, "_orig_index"]
+    indices_to_drop = []
+
+    if delete_all_rows_flag:
+        # удалить все строки текущего фильтра
+        indices_to_drop = view_df.index.tolist()
+    else:
+        # удалить только выделенные в таблице
+        for row in selected_rows:
+            orig_idx = row.get("_orig_index")
+            if orig_idx is not None and orig_idx in merged_df_current.index:
+                indices_to_drop.append(orig_idx)
+
+    indices_to_drop = sorted(set(indices_to_drop))
+
+    if not indices_to_drop:
+        st.warning("Нет строк для удаления (ни выбрано, ни по фильтру).")
+    else:
+        df_before_del = merged_df_current.copy()
+
+        for idx in indices_to_drop:
+            row_data = df_before_del.loc[idx].to_dict()
+            row_id_val = (
+                row_data.get("old_Activity Master Number")
+                or row_data.get("new_Activity Master Number")
+            )
+
+            st.session_state["log_actions"].append({
+                "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "provider": provider_name,
+                "last_version": last_version,
+                "row_id": row_id_val,
+                "action": "delete_row",
+                "column_name": None,
+                "old_value": row_data,
+                "new_value": None,
+                "manager_id": manager_id,
+            })
+
+        merged_df_current.drop(index=indices_to_drop, inplace=True)
+        merged_df_current.reset_index(drop=True, inplace=True)
+        st.session_state["merged_df"] = merged_df_current
+
+        st.success(f"Удалено строк: {len(indices_to_drop)}")
+
+
+# ============================================================
+# ПЕРЕИМЕНОВАНИЕ / УДАЛЕНИЕ СТОЛБЦОВ
+# ============================================================
+st.header("✏ Редактирование структуры (столбцы)")
+
+full_df = st.session_state["merged_df"]
+
+# --- Переименование столбца ---
+st.subheader("Переименовать столбец")
+
+col_to_rename = st.selectbox("Столбец для переименования", full_df.columns.tolist())
+new_col_name = st.text_input("Новое имя столбца", key="rename_col_input")
+
+if st.button("Переименовать столбец"):
+    if new_col_name and new_col_name not in full_df.columns:
+        old_name = col_to_rename
+        st.session_state["merged_df"].rename(columns={old_name: new_col_name}, inplace=True)
+
+        st.session_state["log_actions"].append({
+            "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "provider": provider_name,
+            "last_version": last_version,
+            "row_id": None,
+            "action": "rename_column",
+            "column_name": old_name,
+            "old_value": old_name,
+            "new_value": new_col_name,
+            "manager_id": manager_id,
+        })
+
+        st.success(f"Столбец '{old_name}' переименован в '{new_col_name}'")
+    else:
+        st.warning("Укажите уникальное новое имя столбца.")
+
+full_df = st.session_state["merged_df"]
+
+# --- Удаление столбцов ---
+st.subheader("Удалить столбцы")
+
+select_all_cols = st.checkbox("Выделить все столбцы для удаления")
+if select_all_cols:
+    cols_to_delete = full_df.columns.tolist()
+else:
+    cols_to_delete = st.multiselect("Выберите столбцы для удаления", full_df.columns.tolist())
+
+if st.button("Удалить столбцы"):
+    merged_df_current = st.session_state["merged_df"].copy()
+    deleted_count = 0
+    for c in cols_to_delete:
+        if c in merged_df_current.columns:
+            merged_df_current.drop(columns=[c], inplace=True)
+            deleted_count += 1
+
+            st.session_state["log_actions"].append({
+                "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "provider": provider_name,
+                "last_version": last_version,
+                "row_id": None,
+                "action": "delete_column",
+                "column_name": c,
+                "old_value": "COLUMN",
+                "new_value": None,
+                "manager_id": manager_id,
+            })
+
+    st.session_state["merged_df"] = merged_df_current
+    st.success(f"Удалено столбцов: {deleted_count}")
+
+
+# ============================================================
+# СОХРАНЕНИЕ ИЗМЕНЕНИЙ ЯЧЕЕК
+# ============================================================
+st.subheader("💾 Сохранить изменения в таблице")
+
+if st.button("Сохранить изменения в ячейках"):
+    merged_df_current = st.session_state["merged_df"].copy()
+
+    for i in grid_df_after.index:
+        orig_idx = grid_df_after.loc[i, "_orig_index"]
         if orig_idx not in merged_df_current.index:
             continue
 
-        for col in grid_df.columns:
+        for col in grid_df_after.columns:
             if col == "_orig_index":
                 continue
 
             old_val = grid_df_before.loc[i, col]
-            new_val = grid_df.loc[i, col]
+            new_val = grid_df_after.loc[i, col]
 
-            # оба NaN — пропускаем
             if pd.isna(old_val) and pd.isna(new_val):
                 continue
             if str(old_val) != str(new_val):
-                # обновляем основную таблицу
                 merged_df_current.loc[orig_idx, col] = new_val
 
                 row_data = merged_df_current.loc[orig_idx]

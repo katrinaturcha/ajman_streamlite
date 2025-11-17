@@ -307,48 +307,50 @@ view_df_visible["_orig_index"] = view_df_visible.index
 # ТАБЛИЦА (AGGrid, редактируема)
 # ============================================================
 st.header("📋 Таблица (редактируемая)")
+# добавляем уникальный RowID
+view_df_visible = view_df_visible.copy()
+view_df_visible["_rid"] = (
+    view_df_visible["_orig_index"].astype(str) + "_" +
+    view_df_visible.index.astype(str)
+)
 
 # Кнопка УДАЛИТЬ ВЫБРАННЫЕ СТРОКИ – визуально над таблицей
 delete_rows_clicked = st.button("🗑 Удалить выбранные строки")
 
 gb = GridOptionsBuilder.from_dataframe(view_df_visible)
+
 gb.configure_default_column(
     editable=True,
-    filter="agTextColumnFilter",
+    filter=True,
     sortable=True,
     resizable=True,
     wrapText=True,
 )
 
-# выбор строк только чекбоксами, как в Jupyter
 gb.configure_selection("multiple", use_checkbox=True)
+
 gb.configure_grid_options(
     enableRangeSelection=True,
     rowSelection="multiple",
     suppressRowClickSelection=True,
-    # включаем enterprise column menu с Rename / Delete / Hide / Sort / Filter
-    suppressMenuHide=False,
 )
 
-# первый столбец делаем с master-чекбоксом
-if len(view_df_visible.columns) > 0:
-    first_col = view_df_visible.columns[0]
-    gb.configure_column(
-        first_col,
-        headerCheckboxSelection=True,
-        headerCheckboxSelectionFilteredOnly=True,
-        checkboxSelection=True,
-    )
-
-# скрываем служебный индекс
 gb.configure_column("_orig_index", hide=True)
+gb.configure_column("_rid", hide=True)
 
 grid_options = gb.build()
+
+# обязательный JS для сохранения идентификаторов строк
+grid_options["getRowId"] = JsCode("""
+function(params) { 
+    return params.data._rid;
+}
+""")
 
 grid_response = AgGrid(
     view_df_visible,
     gridOptions=grid_options,
-    update_mode=GridUpdateMode.VALUE_CHANGED | GridUpdateMode.SELECTION_CHANGED,
+    update_mode=(GridUpdateMode.VALUE_CHANGED | GridUpdateMode.SELECTION_CHANGED),
     allow_unsafe_jscode=True,
     enable_enterprise_modules=True,
     height=650,
@@ -356,56 +358,36 @@ grid_response = AgGrid(
 
 grid_df_after = pd.DataFrame(grid_response["data"])
 grid_df_before = view_df_visible.copy()
-selected_rows = grid_response["selected_rows"]  # список словарей выбранных строк
+
+selected_rows = grid_response["selected_rows"]  # ← тут теперь есть _rid
 
 # ============================================================
 # УДАЛЕНИЕ ВЫБРАННЫХ СТРОК (через _selectedRowNodeInfo)
 # ============================================================
 if delete_rows_clicked:
     merged_df_current = st.session_state["merged_df"].copy()
-    indices_to_drop_rows = []
 
-    for row in selected_rows:
-        orig_idx = None
+    selected_rids = {row["_rid"] for row in selected_rows if "_rid" in row}
 
-        # selected_rows в st_aggrid обычно dict
-        if isinstance(row, dict):
-
-            # 1) пытаемся взять служебный индекс строки из _selectedRowNodeInfo
-            node_info = row.get("_selectedRowNodeInfo")
-            if isinstance(node_info, dict):
-                node_idx = node_info.get("nodeRowIndex", node_info.get("rowIndex"))
-
-                if node_idx is not None and 0 <= node_idx < len(view_df_visible):
-                    try:
-                        orig_idx = view_df_visible.iloc[int(node_idx)]["_orig_index"]
-                    except Exception:
-                        orig_idx = None
-
-            # 2) запасной вариант: если вдруг _orig_index есть прямо в selected_rows
-            if orig_idx is None and "_orig_index" in row:
-                orig_idx = row.get("_orig_index")
-
-        # если индекс найден и он реально есть в merged_df_current
-        if orig_idx is not None and orig_idx in merged_df_current.index:
-            indices_to_drop_rows.append(orig_idx)
-
-    indices_to_drop_rows = sorted(set(indices_to_drop_rows))
-
-    if not indices_to_drop_rows:
+    if not selected_rids:
         st.warning("Нет выделенных строк для удаления.")
     else:
-        df_before = merged_df_current.copy()
+        orig_ids_to_delete = []
 
-        for idx in indices_to_drop_rows:
-            if idx not in df_before.index:
+        for rid in selected_rids:
+            # rid = "_orig_index + '_' + view_index"
+            orig_idx = int(rid.split("_")[0])
+            orig_ids_to_delete.append(orig_idx)
+
+        orig_ids_to_delete = sorted(set(orig_ids_to_delete))
+
+        # ЛОГИ + удаление строк
+        for idx in orig_ids_to_delete:
+            if idx not in merged_df_current.index:
                 continue
 
-            row_data = df_before.loc[idx].to_dict()
-            row_id_val = (
-                row_data.get("old_Activity Master Number")
-                or row_data.get("new_Activity Master Number")
-            )
+            row_data = merged_df_current.loc[idx].to_dict()
+            row_id_val = row_data.get("old_Activity Master Number") or row_data.get("new_Activity Master Number")
 
             st.session_state["log_actions"].append({
                 "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -419,34 +401,52 @@ if delete_rows_clicked:
                 "manager_id": manager_id,
             })
 
-        merged_df_current.drop(index=indices_to_drop_rows, inplace=True)
+            merged_df_current.drop(index=idx, inplace=True)
+
         merged_df_current.reset_index(drop=True, inplace=True)
         st.session_state["merged_df"] = merged_df_current
-        st.success(f"Удалено строк: {len(indices_to_drop_rows)}")
+
+        st.success(f"Удалено строк: {len(orig_ids_to_delete)}")
+
 
 # ============================================================
-# СОХРАНЕНИЕ ИЗМЕНЕНИЙ (ЯЧЕЙКИ + ПОПЫТКА ЗАХВАТИТЬ RENAME КОЛОНОК)
+# 💾 СОХРАНЕНИЕ ИЗМЕНЕНИЙ И ЛОГИРНОВАНИЕ
 # ============================================================
 st.header("💾 Сохранить изменения и выгрузить Excel")
 
 if st.button("Сохранить изменения"):
     merged_df_current = st.session_state["merged_df"].copy()
 
-    # 1) изменения ячеек
-    for i in grid_df_after.index:
-        orig_idx = grid_df_after.loc[i, "_orig_index"]
+    # 1. Собираем таблицу ДО и ПОСЛЕ
+    before_df = grid_df_before.copy()
+    after_df = grid_df_after.copy()
+
+    # привязываемся только по _rid
+    before_df = before_df.set_index("_rid")
+    after_df = after_df.set_index("_rid")
+
+    # 2. Логируем изменения ячеек
+    for rid in after_df.index:
+
+        if rid not in before_df.index:
+            # новая строка (пока не реализуем, но можно добавить)
+            continue
+
+        orig_idx = int(rid.split("_")[0])         # ← индекс в merged_df
         if orig_idx not in merged_df_current.index:
             continue
 
-        for col in grid_df_after.columns:
-            if col == "_orig_index":
+        for col in after_df.columns:
+            if col in ["_rid"]:  # служебные
                 continue
 
-            old_val = grid_df_before.loc[i, col]
-            new_val = grid_df_after.loc[i, col]
+            old_val = before_df.loc[rid, col]
+            new_val = after_df.loc[rid, col]
 
-            if pd.isna(old_val) and pd.isna(new_val):
+            # если значение изменилось
+            if (pd.isna(old_val) and pd.isna(new_val)):
                 continue
+
             if str(old_val) != str(new_val):
                 merged_df_current.loc[orig_idx, col] = new_val
 
@@ -468,40 +468,44 @@ if st.button("Сохранить изменения"):
                     "manager_id": manager_id,
                 })
 
-    # 2) попытка считать переименования столбцов из grid_response
-    # (AGGrid хранит их в состоянии колонок; в st_aggrid может быть ключ "column_state" или "grid_state")
-    try:
-        col_state = grid_response.get("column_state") or grid_response.get("grid_state", {}).get("columnState")
-    except Exception:
-        col_state = None
+    # =======================================================
+    # 3. Логируем переименование столбцов (если было)
+    # =======================================================
+    col_state = grid_response.get("column_state") or grid_response.get("grid_state", {}).get("columnState")
 
     if col_state:
         rename_map = {}
         for cs in col_state:
             col_id = cs.get("colId")
             header_name = cs.get("headerName")
+
             if col_id and header_name and col_id in merged_df_current.columns:
                 if header_name != col_id:
                     rename_map[col_id] = header_name
 
-        if rename_map:
-            for old_name, new_name in rename_map.items():
-                st.session_state["log_actions"].append({
-                    "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "provider": provider_name,
-                    "last_version": last_version,
-                    "row_id": None,
-                    "action": "rename_column",
-                    "column_name": old_name,
-                    "old_value": old_name,
-                    "new_value": new_name,
-                    "manager_id": manager_id,
-                })
-            merged_df_current.rename(columns=rename_map, inplace=True)
+        # фиксируем в логах
+        for old_name, new_name in rename_map.items():
+            st.session_state["log_actions"].append({
+                "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "provider": provider_name,
+                "last_version": last_version,
+                "row_id": None,
+                "action": "rename_column",
+                "column_name": old_name,
+                "old_value": old_name,
+                "new_value": new_name,
+                "manager_id": manager_id,
+            })
 
+        merged_df_current.rename(columns=rename_map, inplace=True)
+
+    # =======================================================
+    # 4. Обновляем merged_df после всех изменений
+    # =======================================================
+    merged_df_current.reset_index(drop=True, inplace=True)
     st.session_state["merged_df"] = merged_df_current
-    st.success("Все изменения сохранены и подготовлены к выгрузке.")
 
+    st.success("Все изменения сохранены и учтены в логах.")
 
 # ============================================================
 # СКАЧАТЬ ОБЪЕДИНЁННУЮ ТАБЛИЦУ

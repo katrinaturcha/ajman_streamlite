@@ -377,8 +377,7 @@ gb.configure_grid_options(
     enableRangeSelection=True,
     rowSelection="multiple",
     suppressRowClickSelection=True,
-    suppressMenuHide=False,
-    getMainMenuItems=column_menu_js,     # ← кастомное меню
+    suppressMenuHide=False
 )
 
 
@@ -395,8 +394,55 @@ if first_col:
 # скрыть служебную колонку
 gb.configure_column("_orig_index", hide=True)
 
+
+# --- 💡 РАБОЧИЙ КАСТОМНЫЙ МЕНЮ-КОД ---
+custom_menu_js = JsCode("""
+function getMainMenuItems(params) {
+
+    var result = params.defaultItems.slice(0);
+
+    result.push('separator');
+
+    // RENAME COLUMN
+    result.push({
+        name: 'Rename column',
+        action: function() {
+            let col = params.column;
+            let api = params.api;
+            let oldName = col.colDef.headerName || col.colDef.field;
+
+            let newName = window.prompt('Новое имя столбца:', oldName);
+            if (newName && newName !== oldName) {
+                col.colDef.headerName = newName;
+                api.refreshHeader();
+            }
+        }
+    });
+
+    // DELETE COLUMN
+    result.push({
+        name: 'Delete column',
+        action: function() {
+            let field = params.column.colId;
+            let api = params.api;
+
+            let newDefs = api.getColumnDefs().filter(c => c.colId !== field);
+            api.setColumnDefs(newDefs);
+        }
+    });
+
+    return result;
+}
+""")
+
+
 grid_options = gb.build()
 
+# ВАЖНО: ВСТАВИТЬ ТОЛЬКО ЗДЕСЬ
+grid_options["getMainMenuItems"] = custom_menu_js
+
+
+# --- РЕНДЕР AG GRID ---
 grid_response = AgGrid(
     view_df,
     gridOptions=grid_options,
@@ -410,10 +456,9 @@ grid_response = AgGrid(
 )
 
 grid_df_after = pd.DataFrame(grid_response["data"])
-grid_df_before = view_df.copy()    # до изменений
-selected_rows = grid_response["selected_rows"]  # выделенные строки
+grid_df_before = view_df.copy()
+selected_rows = grid_response["selected_rows"]
 column_state = grid_response.get("column_state") or grid_response.get("grid_state", {}).get("columnState", None)
-
 
 # ============================================================
 # 🗑 ЛОГИКА: УДАЛЕНИЕ ВЫБРАННЫХ СТРОК

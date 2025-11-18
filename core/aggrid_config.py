@@ -1,155 +1,74 @@
-import pandas as pd
+# core/aggrid_config.py
+
 from st_aggrid import GridOptionsBuilder
-from st_aggrid.shared import JsCode
+from typing import Iterable
+import pandas as pd
 
 
-# ============================================================
-# JS-код для контекстного меню столбца (как в Google Sheets)
-# ============================================================
-
-COLUMN_MENU_JS = JsCode("""
-function getMainMenuItems(params) {
-    var defaultMenu = params.defaultItems.slice();
-
-    defaultMenu.push({
-        name: 'Rename column',
-        action: function() {
-            var col = params.column;
-            var api = params.api;
-            var oldName = col.colDef.headerName || col.colDef.field;
-
-            var newName = window.prompt('Enter new column name:', oldName);
-            if (newName && newName !== oldName) {
-
-                // обновляем headerName
-                col.colDef.headerName = newName;
-                api.refreshHeader();
-
-                // пишем в глобальный window объект (Streamlit считает потом)
-                if (!window._renameEvents) { window._renameEvents = [] }
-                window._renameEvents.push({
-                    oldName: oldName,
-                    newName: newName
-                });
-            }
-        }
-    });
-
-    defaultMenu.push({
-        name: 'Delete column',
-        action: function() {
-            var field = params.column.colId;
-            var api = params.api;
-
-            var newDefs = api.getColumnDefs().filter(c => c.colId !== field);
-            api.setColumnDefs(newDefs);
-
-            if (!window._deleteColumnEvents) { window._deleteColumnEvents = [] }
-            window._deleteColumnEvents.push({
-                column: field
-            });
-        }
-    });
-
-    defaultMenu.push("separator");
-
-    defaultMenu.push("sortAscending");
-    defaultMenu.push("sortDescending");
-    defaultMenu.push("separator");
-    defaultMenu.push("pinSubMenu");
-    defaultMenu.push("valueAggSubMenu");
-
-    return defaultMenu;
-}
-""")
-
-
-# ============================================================
-# JS: назначение уникального ID строки — _rid
-# ============================================================
-
-GET_ROW_ID_JS = JsCode("""
-function(params) {
-    return params.data._rid;
-}
-""")
-
-
-# ============================================================
-# Конструктор gridOptions (AG-Grid)
-# ============================================================
-
-def build_aggrid_options(view_df: pd.DataFrame):
+def build_grid_options(
+    df: pd.DataFrame,
+    *,
+    checkbox_selection: bool = True,
+    enable_sidebar: bool = True,
+    hidden_cols: Iterable[str] = ("_orig_index", "_rowid"),
+) -> dict:
     """
-    Создаёт GridOptionsBuilder и формирует корректные gridOptions.
-    Возвращает:
-        grid_options
+    Создаёт gridOptions для AgGrid с максимально типичным поведением
+    excel / google sheets:
+
+    - редактируемые ячейки
+    - сортировка / фильтры / resize
+    - мультивыделение строк с чекбоксами
+    - master checkbox в заголовке (select all по фильтру)
+    - опциональный sidebar для показа/скрытия столбцов.
     """
 
-    gb = GridOptionsBuilder.from_dataframe(view_df)
+    if df.empty:
+        gb = GridOptionsBuilder.from_dataframe(df)
+    else:
+        gb = GridOptionsBuilder.from_dataframe(df)
 
-    # ---------------------------------------
-    # DEFAULT COLUMN BEHAVIOR (как Sheets)
-    # ---------------------------------------
-
+    # базовые настройки столбцов
     gb.configure_default_column(
         editable=True,
         filter=True,
         sortable=True,
         resizable=True,
         wrapText=True,
-        autoHeight=True
+        autoHeight=True,
     )
 
-    # ---------------------------------------
-    # SELECTION MODE: checkbox + select all
-    # ---------------------------------------
+    # выбор строк чекбоксами
+    if checkbox_selection:
+        gb.configure_selection(
+            selection_mode="multiple",
+            use_checkbox=True,
+        )
+        gb.configure_grid_options(
+            rowSelection="multiple",
+            suppressRowClickSelection=True,
+            enableRangeSelection=True,
+        )
 
-    gb.configure_selection(
-        selection_mode="multiple",
-        use_checkbox=True
-    )
+        # первый столбец — с master checkbox
+        first_col = df.columns[0] if len(df.columns) else None
+        if first_col is not None:
+            gb.configure_column(
+                first_col,
+                headerCheckboxSelection=True,
+                headerCheckboxSelectionFilteredOnly=True,
+                checkboxSelection=True,
+            )
 
-    # ---------------------------------------
-    # GRID OPTIONS
-    # ---------------------------------------
+    # скрываем служебные столбцы
+    for c in hidden_cols:
+        if c in df.columns:
+            gb.configure_column(c, hide=True)
 
-    gb.configure_grid_options(
-        rowSelection="multiple",
-        suppressRowClickSelection=True,
-        animateRows=True,
-        undoRedoCellEditing=True,     # встроенный локальный undo-redo в ячейках
-        undoRedoCellEditingLimit=50,
-        getMainMenuItems=COLUMN_MENU_JS,   # кастомное меню
-    )
-
-    # скрываем служебные колонки
-    if "_rid" in view_df.columns:
-        gb.configure_column("_rid", hide=True)
-    if "_orig_index" in view_df.columns:
-        gb.configure_column("_orig_index", hide=True)
-
-    # ---------------------------------------
-    # BUILD OPTIONS
-    # ---------------------------------------
+    # sidebar (показывать / скрывать колонки)
+    if enable_sidebar:
+        gb.configure_side_bar()
 
     grid_options = gb.build()
-
-    # обязательный getRowId
-    grid_options["getRowId"] = GET_ROW_ID_JS
-
-    # включаем боковое меню (columns tab)
-    grid_options["sideBar"] = {
-        "toolPanels": [
-            {
-                "id": "columns",
-                "labelDefault": "Columns",
-                "labelKey": "columns",
-                "iconKey": "columns",
-                "toolPanel": "agColumnsToolPanel"
-            }
-        ],
-        "defaultToolPanel": "columns"
-    }
-
     return grid_options
+

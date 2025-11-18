@@ -3,10 +3,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
-
-# наши модули
+# ag-grid внутри table_editor/aggrid_config
 from core.cleaning import clean_excel_table
+from core.utils import safe_equals
 from core.undo_redo import (
     init_undo_redo,
     push_undo_state,
@@ -17,10 +16,10 @@ from core.logging import (
     init_logs,
     log_edit_cell,
     log_delete_row,
-    log_rename_column,
     get_logs_df,
 )
-from core.utils import safe_equals
+from core.table_editor import render_editable_table
+from core.editing import apply_row_deletions, apply_cell_edits
 
 
 # ------------------------------------------------------------
@@ -154,6 +153,7 @@ for col in new_cols:
         )
 
 df_log_schema = pd.DataFrame(log_rows)
+st.subheader("📄 log_schema")
 st.dataframe(df_log_schema, use_container_width=True)
 
 
@@ -243,7 +243,7 @@ merged_df.insert(0, "changed columns", changed_col)
 merged_df.insert(0, "status", status_col)
 merged_df.insert(1, "_merge", merge_col)
 
-# сохраняем в session_state
+# сохраняем в session_state как "текущая версия"
 st.session_state["merged_df"] = merged_df.copy()
 
 
@@ -260,9 +260,9 @@ status_filter = st.selectbox(
 base_df = st.session_state["merged_df"]
 
 if status_filter == "all":
-    view_df = base_df.copy()
+    filtered_df = base_df.copy()
 else:
-    view_df = base_df[base_df["status"] == status_filter].copy()
+    filtered_df = base_df[base_df["status"] == status_filter].copy()
 
 
 # ------------------------------------------------------------
@@ -271,18 +271,17 @@ else:
 with st.sidebar:
     st.subheader("👁 Видимость столбцов")
     visible_cols = []
-    for c in view_df.columns:
+    for c in filtered_df.columns:
         vis = st.checkbox(c, value=True, key=f"vis_{c}")
         if vis:
             visible_cols.append(c)
     if not visible_cols:
         st.warning("Не выбрано ни одного столбца — таблица будет пустой.")
 
-view_df_visible = view_df[visible_cols] if visible_cols else view_df.iloc[:, :0]
-
-# служебный индекс для связи с merged_df
-view_df_visible = view_df_visible.copy()
-view_df_visible["_orig_index"] = view_df_visible.index
+if visible_cols:
+    view_df = filtered_df[visible_cols]
+else:
+    view_df = filtered_df.iloc[:, :0]
 
 
 # ------------------------------------------------------------
@@ -296,7 +295,6 @@ if col_undo.button("↩ Отменить последнее действие"):
     if res is None:
         st.warning("Нет действий для отмены.")
     else:
-        log_undo(st.session_state, manager_id)
         st.success("Последнее действие отменено.")
 
 if col_redo.button("↪ Повторить (redo)"):
@@ -308,105 +306,55 @@ if col_redo.button("↪ Повторить (redo)"):
 
 
 # ------------------------------------------------------------
+# РЕНДЕР РЕДАКТИРУЕМОЙ ТАБЛИЦЫ (AG-GRID)
+# ------------------------------------------------------------
+# здесь всё управление гридом вынесено в core.table_editor
+result = render_editable_table(view_df, grid_key="main_grid", height=650)
+
+df_after_grid = result["df_after"]
+selected_orig_indices = result["selected_orig_indices"]
+cell_changes = result["cell_changes"]
+
+# ------------------------------------------------------------
 # КНОПКА УДАЛЕНИЯ ВЫБРАННЫХ СТРОК
 # ------------------------------------------------------------
-delete_rows_clicked = st.button("🗑 Удалить выбранные строки")
+st.markdown("### 🗑 Удаление строк")
 
-
-# ------------------------------------------------------------
-# НАСТРОЙКА AG-GRID
-# ------------------------------------------------------------
-gb = GridOptionsBuilder.from_dataframe(view_df_visible)
-
-gb.configure_default_column(
-    editable=True,
-    filter=True,
-    sortable=True,
-    resizable=True,
-    wrapText=True,
-)
-
-gb.configure_selection("multiple", use_checkbox=True)
-gb.configure_grid_options(
-    rowSelection="multiple",
-    suppressRowClickSelection=True,
-    enableRangeSelection=True,
-)
-
-# первый столбец — с master checkbox (select all по фильтру)
-first_col = view_df_visible.columns[0]
-gb.configure_column(
-    first_col,
-    headerCheckboxSelection=True,
-    headerCheckboxSelectionFilteredOnly=True,
-    checkboxSelection=True,
-)
-
-gb.configure_column("_orig_index", hide=True)
-
-grid_options = gb.build()
-
-grid_response = AgGrid(
-    view_df_visible,
-    gridOptions=grid_options,
-    update_mode=GridUpdateMode.VALUE_CHANGED | GridUpdateMode.SELECTION_CHANGED,
-    data_return_mode="AS_INPUT",
-    fit_columns_on_grid_load=False,
-    enable_enterprise_modules=True,
-    height=650,
-)
-
-grid_df_after = pd.DataFrame(grid_response["data"])
-grid_df_before = view_df_visible.copy()
-selected_rows = grid_response["selected_rows"]  # список dict'ов
-
-
-# ------------------------------------------------------------
-# УДАЛЕНИЕ ВЫБРАННЫХ СТРОК
-# ------------------------------------------------------------
-if delete_rows_clicked:
-    merged_df_current = st.session_state["merged_df"].copy()
-
-    # список индексов в merged_df
-    indices_to_drop = []
-    for row in selected_rows:
-        if "_orig_index" in row:
-            try:
-                idx = int(row["_orig_index"])
-                indices_to_drop.append(idx)
-            except Exception:
-                continue
-
-    indices_to_drop = sorted(set(indices_to_drop))
-
-    if not indices_to_drop:
+if st.button("Удалить выбранные строки"):
+    if not selected_orig_indices:
         st.warning("Нет выделенных строк для удаления.")
     else:
+        merged_df_current = st.session_state["merged_df"].copy()
+
         # сохраняем состояние для undo
-        push_undo_state(st.session_state, merged_df_current, st.session_state["log_actions"])
+        push_undo_state(
+            st.session_state,
+            merged_df_current,
+            st.session_state["log_actions"],
+        )
 
-        for idx in indices_to_drop:
-            if idx not in merged_df_current.index:
-                continue
+        # применяем удаление
+        new_df, row_events = apply_row_deletions(
+            merged_df_current,
+            indices_to_drop=selected_orig_indices,
+        )
 
-            row_data = merged_df_current.loc[idx].to_dict()
+        # логируем каждую удалённую строку
+        for ev in row_events:
+            row_dict = ev["row_data"]
             row_id_val = (
-                row_data.get("old_Activity Master Number")
-                or row_data.get("new_Activity Master Number")
+                row_dict.get("old_Activity Master Number")
+                or row_dict.get("new_Activity Master Number")
             )
-
             log_delete_row(
                 st.session_state,
                 manager_id=manager_id,
                 row_id=row_id_val,
-                old_row_dict=row_data,
+                old_row_dict=row_dict,
             )
 
-            merged_df_current.drop(index=idx, inplace=True)
-
-        merged_df_current.reset_index(drop=True, inplace=True)
-        st.session_state["merged_df"] = merged_df_current
-        st.success(f"Удалено строк: {len(indices_to_drop)}")
+        st.session_state["merged_df"] = new_df
+        st.success(f"Удалено строк: {len(row_events)}")
 
 
 # ------------------------------------------------------------
@@ -415,36 +363,40 @@ if delete_rows_clicked:
 st.header("💾 Сохранить изменения и выгрузить Excel")
 
 if st.button("Сохранить изменения"):
-    merged_df_current = st.session_state["merged_df"].copy()
+    if not cell_changes:
+        st.info("Нет изменений ячеек для сохранения.")
+    else:
+        merged_df_before = st.session_state["merged_df"].copy()
 
-    # сохраняем состояние для undo
-    push_undo_state(st.session_state, merged_df_current, st.session_state["log_actions"])
+        # сохраняем состояние для undo
+        push_undo_state(
+            st.session_state,
+            merged_df_before,
+            st.session_state["log_actions"],
+        )
 
-    before_df = grid_df_before.set_index("_orig_index")
-    after_df = grid_df_after.set_index("_orig_index")
+        # применяем изменения ячеек
+        new_df, cell_events = apply_cell_edits(
+            merged_df_before,
+            cell_changes=cell_changes,
+        )
 
-    for orig_idx in after_df.index:
-        if orig_idx not in merged_df_current.index:
-            continue
+        # логируем
+        for ch in cell_events:
+            idx = ch["orig_index"]
+            col = ch["column"]
+            old_val = ch["old_value"]
+            new_val = ch["new_value"]
 
-        for col in after_df.columns:
-            if col == "_orig_index":
-                continue
-
-            old_val = before_df.loc[orig_idx, col]
-            new_val = after_df.loc[orig_idx, col]
-
-            if safe_equals(old_val, new_val):
-                continue
-
-            # обновляем merged_df
-            merged_df_current.loc[orig_idx, col] = new_val
-
-            row_data = merged_df_current.loc[orig_idx]
-            row_id_val = (
-                row_data.get("old_Activity Master Number")
-                or row_data.get("new_Activity Master Number")
-            )
+            # row_id берём по старому df (индекс ещё есть)
+            if idx in merged_df_before.index:
+                row_data_before = merged_df_before.loc[idx]
+                row_id_val = (
+                    row_data_before.get("old_Activity Master Number")
+                    or row_data_before.get("new_Activity Master Number")
+                )
+            else:
+                row_id_val = None
 
             log_edit_cell(
                 st.session_state,
@@ -455,9 +407,8 @@ if st.button("Сохранить изменения"):
                 new_value=new_val,
             )
 
-    merged_df_current.reset_index(drop=True, inplace=True)
-    st.session_state["merged_df"] = merged_df_current
-    st.success("Все изменения сохранены и зафиксированы в логах.")
+        st.session_state["merged_df"] = new_df
+        st.success("Все изменения сохранены и зафиксированы в логах.")
 
 
 # ------------------------------------------------------------

@@ -104,7 +104,16 @@ def render_editable_table(
     df_after = pd.DataFrame(grid_response["data"])
 
     # selected_rows может отсутствовать → берём безопасно
-    selected_rows = grid_response.get("selected_rows") or []
+    # safe extract selected rows
+    selected_rows_raw = grid_response.get("selected_rows", [])
+
+    # st_aggrid иногда отдаёт selected_rows как DataFrame, а иногда как list[dict]
+    if isinstance(selected_rows_raw, pd.DataFrame):
+        selected_rows = selected_rows_raw.to_dict(orient="records")
+    elif selected_rows_raw is None:
+        selected_rows = []
+    else:
+        selected_rows = selected_rows_raw  # обычно list[dict]
 
     # ---------------------------------------------------------
     # 4. Вычисляем изменённые ячейки (до/после)

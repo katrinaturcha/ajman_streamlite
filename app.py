@@ -2,6 +2,8 @@ import io
 import numpy as np
 import pandas as pd
 import streamlit as st
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
+
 
 # ag-grid внутри table_editor/aggrid_config
 from core.cleaning import clean_excel_table
@@ -512,3 +514,117 @@ st.download_button(
     file_name="log_edit.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
+
+
+# ------------------------------------------------------------
+# БЛОК: Загрузка переводов и добавление столбцов
+# ------------------------------------------------------------
+st.header("🌍 Добавление переводов и метаданных к итоговой таблице")
+
+translated_file = st.file_uploader(
+    "Загрузите файл с переводом (df_translated)",
+    type=["xlsx"],
+    key="translated_upload"
+)
+
+if translated_file:
+    df_translated = pd.read_excel(translated_file, dtype=object)
+
+    st.success(f"Файл загружен: {translated_file.name}")
+    st.write(f"Строк: {df_translated.shape[0]}, столбцов: {df_translated.shape[1]}")
+
+    # --------------------------------------------------------
+    # Список новых столбцов, которые нужно добавить справа
+    # --------------------------------------------------------
+    new_cols = [
+        'Универсальная', 'Кандидаты', 'ID Типа лицензии',
+        'Нужны дополнительные разрешения (NOC)',
+        'Required Documents',
+        '1. Название органа', '1. ИД органа', '1. Название услуги', '1. ИД услуги',
+        '2. Название органа', '2. ИД органа', '2. Название услуги', '2. ИД услуги',
+        'Существуют специальные требования к уставному капиталу',
+        'Специальные требования к уставному капиталу',
+        'Существуют специальные требования к инфраструктуре',
+        'ИД инфраструктурных объектов (через ;)', 'Allowed Facility Type',
+        'Существуют специальные требования к учредителю',
+        'Кто может быть учредителем',
+        'Можно совмещать с другими активити',
+        'Деятельность только на территории страны регистрации',
+        'Деятельность только за пределами страны регистрации',
+        'Только для филиалов иностранных компаний',
+        'Существуют дополнительные требования, условия',
+        'ИД Требования Базовые', 'Дополнительные требования, условия ',
+        'Примечание (для внутреннего использования)',
+        'Пакеты', 'ИД ОПФ', 'ОПФ'
+    ]
+
+    # Добавление новых столбцов, если их нет
+    for col in new_cols:
+        if col not in df_translated.columns:
+            df_translated[col] = None
+
+    st.markdown("### 🧾 Итоговая таблица с дополнительными полями")
+
+    # --------------------------------------------------------
+    # Настройка AG-Grid (разрешено перетаскивание столбцов)
+    # --------------------------------------------------------
+    gb2 = GridOptionsBuilder.from_dataframe(df_translated)
+
+    gb2.configure_default_column(
+        editable=True,
+        filter=True,
+        sortable=True,
+        resizable=True,
+        wrapText=True,
+        autoHeight=True
+    )
+
+    gb2.configure_grid_options(
+        enableRangeSelection=True,
+        enableColResize=True,
+        enableSorting=True,
+        enableFilter=True,
+        rowSelection="multiple",
+        suppressRowClickSelection=False,
+        suppressMovableColumns=False  # ← разрешаем перетаскивать колонки
+    )
+
+    grid_options_2 = gb2.build()
+
+    grid_response_2 = AgGrid(
+        df_translated,
+        gridOptions=grid_options_2,
+        update_mode=GridUpdateMode.VALUE_CHANGED,
+        allow_unsafe_jscode=True,
+        enable_enterprise_modules=True,
+        height=600,
+        fit_columns_on_grid_load=False,
+        key="translation_grid"
+    )
+
+    df_translated_after = pd.DataFrame(grid_response_2["data"])
+
+    # --------------------------------------------------------
+    # Кнопка сохранить изменения
+    # --------------------------------------------------------
+    if st.button("💾 Сохранить изменения в переводах"):
+        st.session_state["df_translated_final"] = df_translated_after.copy()
+        st.success("Изменения сохранены!")
+
+    # --------------------------------------------------------
+    # Кнопка скачать результат
+    # --------------------------------------------------------
+    if "df_translated_final" in st.session_state:
+        def download_translated(df):
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="translated")
+            buffer.seek(0)
+            return buffer
+
+        st.download_button(
+            "⬇ Скачать таблицу переводов",
+            data=download_translated(st.session_state["df_translated_final"]),
+            file_name="translated_final.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )

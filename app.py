@@ -356,6 +356,61 @@ if st.button("Удалить выбранные строки"):
         st.session_state["merged_df"] = new_df
         st.success(f"Удалено строк: {len(row_events)}")
 
+# ------------------------------------------------------------
+# УДАЛЕНИЕ СТОЛБЦОВ
+# ------------------------------------------------------------
+st.markdown("### 🧱 Удаление столбцов")
+
+current_df = st.session_state["merged_df"]
+all_columns = list(current_df.columns)
+
+st.write("Отметьте столбцы, которые нужно удалить:")
+
+cols_to_delete = []
+for col_name in all_columns:
+    checked = st.checkbox(col_name, value=False, key=f"del_col_{col_name}")
+    if checked:
+        cols_to_delete.append(col_name)
+
+delete_cols_clicked = st.button("🗑 Удалить выбранные столбцы")
+
+if delete_cols_clicked:
+    if not cols_to_delete:
+        st.warning("Не выбрано ни одного столбца для удаления.")
+    else:
+        merged_df_current = st.session_state["merged_df"].copy()
+
+        # сохраняем состояние для undo
+        push_undo_state(
+            st.session_state,
+            merged_df_current,
+            st.session_state["log_actions"],
+        )
+
+        # логируем и удаляем по очереди
+        for col_name in cols_to_delete:
+            if col_name not in merged_df_current.columns:
+                continue
+
+            # логируем само действие удаления столбца
+            st.session_state["log_actions"].append({
+                "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "provider": provider_name,
+                "last_version": last_version,
+                "row_id": None,
+                "action": "delete_column",
+                "column_name": col_name,
+                "old_value": f"column_deleted",
+                "new_value": None,
+                "manager_id": manager_id,
+            })
+
+        # физическое удаление столбцов
+        merged_df_current.drop(columns=cols_to_delete, inplace=True, errors="ignore")
+        merged_df_current.reset_index(drop=True, inplace=True)
+        st.session_state["merged_df"] = merged_df_current
+
+        st.success(f"Удалено столбцов: {len(cols_to_delete)}")
 
 # ------------------------------------------------------------
 # СОХРАНЕНИЕ ИЗМЕНЕНИЙ (ЯЧЕЙКИ)
@@ -429,6 +484,7 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
+st.caption("Этот файл отдается на перевод.")
 
 # ------------------------------------------------------------
 # ЛОГ ДЕЙСТВИЙ МЕНЕДЖЕРА

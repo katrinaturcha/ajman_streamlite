@@ -563,6 +563,7 @@ if translated_file:
             df_translated[col] = None
 
     st.markdown("### Итоговая таблица с дополнительными полями")
+    st.caption("Тут можно еще подключить БД с подбором универсальной ID")
 
     # --------------------------------------------------------
     # Настройка AG-Grid (разрешено перетаскивание столбцов)
@@ -622,8 +623,13 @@ if translated_file:
             return buffer
 
         st.download_button(
-            "⬇ Скачать таблицу переводов",
+            "Скачать таблицу переводов",
             data=download_translated(st.session_state["df_translated_final"]),
             file_name="translated_final.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+
+        st.caption("Эта таблица отправится в Базу Данных.")
+
+
+
